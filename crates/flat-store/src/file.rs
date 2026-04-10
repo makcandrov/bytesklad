@@ -56,6 +56,17 @@ impl DataFile {
         Ok(buf)
     }
 
+    pub fn offset(&self) -> u64 {
+        self.writer.lock().offset
+    }
+
+    pub fn truncate(&self, offset: u64) -> Result<(), io::Error> {
+        let mut w = self.writer.lock();
+        w.file.set_len(offset)?;
+        w.offset = offset;
+        Ok(())
+    }
+
     pub fn sync(&self) -> Result<(), io::Error> {
         self.writer.lock().file.sync_data()?;
         Ok(())

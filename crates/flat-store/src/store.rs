@@ -2,11 +2,12 @@ use std::{fs, io, path::Path};
 
 use hashbrown::HashMap;
 
-use crate::{DataFile, LockFile};
+use crate::{Checkpoint, DataFile, LockFile};
 
 pub struct FlatStore {
     sized_files: HashMap<usize, DataFile>,
     unsized_file: DataFile,
+    checkpoint: Checkpoint,
     _lock_file: LockFile,
 }
 
@@ -30,17 +31,22 @@ impl FlatStore {
         let lock_file = LockFile::new(path)?;
 
         let mut sized_files = HashMap::new();
+        let buckets: Vec<usize> = buckets.into_iter().collect();
 
-        for bucket in buckets {
+        for &bucket in &buckets {
             let file = DataFile::open(path.join(format!("size_{bucket}")))?;
             sized_files.insert(bucket, file);
         }
 
         let unsized_file = DataFile::open(path.join("unsized"))?;
 
+        let checkpoint = Checkpoint::new(path.join("checkpoint"));
+        checkpoint.recover(&sized_files, &unsized_file, &buckets)?;
+
         Ok(Self {
             sized_files,
             unsized_file,
+            checkpoint,
             _lock_file: lock_file,
         })
     }
@@ -69,12 +75,14 @@ impl FlatStore {
         Ok(buf)
     }
 
-    /// Flush all data files to disk.
+    /// Flush all data files to disk and write a checkpoint.
     pub fn sync(&self) -> Result<(), io::Error> {
         for file in self.sized_files.values() {
             file.sync()?;
         }
         self.unsized_file.sync()?;
+        self.checkpoint
+            .write(&self.sized_files, &self.unsized_file)?;
         Ok(())
     }
 }

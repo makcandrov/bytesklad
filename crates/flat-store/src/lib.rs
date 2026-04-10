@@ -1,3 +1,6 @@
+mod checkpoint;
+use checkpoint::Checkpoint;
+
 mod file;
 use file::DataFile;
 
