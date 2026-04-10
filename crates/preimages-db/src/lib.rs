@@ -1,18 +1,16 @@
 //! Preimage database: `keccak256(data) → data`.
 //!
 //! Uses [`flat_store`] for bulk byte storage and MDBX for the hash index.
-//! Each MDBX entry is 12 bytes: `[8-byte Ref][4-byte len]`.
+//! Each MDBX entry is 12 bytes: `[8-byte offset][4-byte len]`.
 
 use std::fs;
 use std::path::PathBuf;
 
-use flat_store::{FlatStore, FlatStoreConfig, Ref};
+use flat_store::FlatStore;
 use libmdbx::{
     Database, DatabaseOptions, Mode, NoWriteMap, ReadWriteOptions, SyncMode, TableFlags, WriteFlags,
 };
 use thiserror::Error;
-
-pub use flat_store::FileGroup;
 
 const MDBX_TABLE: &str = "preimages";
 const VALUE_LEN: usize = 12;
@@ -38,20 +36,20 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 // ── Value encoding ──────────────────────────────────────────────────
 
-fn encode_value(r: Ref, len: u32) -> [u8; VALUE_LEN] {
+fn encode_value(offset: u64, len: u32) -> [u8; VALUE_LEN] {
     let mut buf = [0u8; VALUE_LEN];
-    buf[..8].copy_from_slice(&r.to_le_bytes());
+    buf[..8].copy_from_slice(&offset.to_le_bytes());
     buf[8..].copy_from_slice(&len.to_le_bytes());
     buf
 }
 
-fn decode_value(raw: &[u8]) -> std::result::Result<(Ref, usize), Error> {
+fn decode_value(raw: &[u8]) -> std::result::Result<(u64, usize), Error> {
     if raw.len() != VALUE_LEN {
         return Err(Error::CorruptIndex);
     }
-    let r = Ref::from_le_bytes(raw[..8].try_into().unwrap());
+    let offset = u64::from_le_bytes(raw[..8].try_into().unwrap());
     let len = u32::from_le_bytes(raw[8..12].try_into().unwrap()) as usize;
-    Ok((r, len))
+    Ok((offset, len))
 }
 
 // ── Config ───────────────────────────────────────────────────────────
@@ -60,17 +58,18 @@ pub struct PreimageDbConfig {
     /// Root directory for all data (MDBX files live here, flat files in a
     /// `data/` subdirectory).
     pub path: PathBuf,
-    /// How to split preimage data across flat files.
-    pub groups: Vec<FileGroup>,
+    /// Bucket sizes for the flat store. Preimages whose length matches a
+    /// bucket go into a dedicated file; all others go into the unsized file.
+    pub buckets: Vec<usize>,
     /// MDBX map size. Default: 64 GB.
     pub mdbx_map_size: usize,
 }
 
 impl PreimageDbConfig {
-    pub fn new(path: impl Into<PathBuf>, groups: Vec<FileGroup>) -> Self {
+    pub fn new(path: impl Into<PathBuf>, buckets: Vec<usize>) -> Self {
         Self {
             path: path.into(),
-            groups,
+            buckets,
             mdbx_map_size: 64 * 1024 * 1024 * 1024,
         }
     }
@@ -106,10 +105,7 @@ impl PreimageDb {
             tx.commit()?;
         }
 
-        let store = FlatStore::open(FlatStoreConfig {
-            path: config.path.join("data"),
-            groups: config.groups,
-        })?;
+        let store = FlatStore::open(config.path.join("data"), config.buckets)?;
 
         Ok(Self { mdbx, store })
     }
@@ -120,10 +116,10 @@ impl PreimageDb {
             return Ok(false);
         }
 
-        let r = self.store.insert(data)?;
+        let offset = self.store.insert(data)?;
         self.store.sync()?;
 
-        let value = encode_value(r, data.len() as u32);
+        let value = encode_value(offset, data.len() as u32);
         let tx = self.mdbx.begin_rw_txn()?;
         let table = tx.open_table(Some(MDBX_TABLE))?;
         tx.put(
@@ -158,15 +154,17 @@ impl PreimageDb {
             return Ok(0);
         }
 
-        let data_slices: Vec<&[u8]> = to_insert.iter().map(|(_, d)| d.as_slice()).collect();
-        let refs = self.store.insert_many(&data_slices)?;
+        let mut offsets = Vec::with_capacity(to_insert.len());
+        for (_, data) in &to_insert {
+            offsets.push(self.store.insert(data)?);
+        }
         self.store.sync()?;
 
         let count = to_insert.len();
         let tx = self.mdbx.begin_rw_txn()?;
         let table = tx.open_table(Some(MDBX_TABLE))?;
         for (i, (hash, data)) in to_insert.iter().enumerate() {
-            let value = encode_value(refs[i], data.len() as u32);
+            let value = encode_value(offsets[i], data.len() as u32);
             tx.put(
                 &table,
                 hash.as_slice(),
@@ -189,8 +187,8 @@ impl PreimageDb {
             return Ok(None);
         };
 
-        let (r, len) = decode_value(&raw)?;
-        let data = self.store.get(r, len)?;
+        let (offset, len) = decode_value(&raw)?;
+        let data = self.store.read_to_vec(offset, len)?;
         Ok(Some(data))
     }
 

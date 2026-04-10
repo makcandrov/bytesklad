@@ -1,7 +1,5 @@
-use std::fs;
-use std::path::PathBuf;
-
-use preimages_db::{FileGroup, PreimageDb, PreimageDbConfig};
+use preimages_db::{PreimageDb, PreimageDbConfig};
+use tempfile::TempDir;
 use tiny_keccak::{Hasher, Keccak};
 
 fn keccak256(data: &[u8]) -> [u8; 32] {
@@ -12,44 +10,34 @@ fn keccak256(data: &[u8]) -> [u8; 32] {
     out
 }
 
-fn tmp_dir(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("preimages_db_test_{name}_{}", std::process::id()));
-    // let _ = fs::remove_dir_all(&dir);
-    dir
-}
-
-fn open_db(name: &str, groups: Vec<FileGroup>) -> (PreimageDb, PathBuf) {
-    let dir = tmp_dir(name);
-    let db = PreimageDb::open(PreimageDbConfig::new(dir.clone(), groups)).unwrap();
+fn open_db(buckets: Vec<usize>) -> (PreimageDb, TempDir) {
+    let dir = TempDir::new().unwrap();
+    let db = PreimageDb::open(PreimageDbConfig::new(dir.path(), buckets)).unwrap();
     (db, dir)
 }
 
 #[test]
 fn insert_and_get() {
-    let (db, dir) = open_db("insert_get", vec![FileGroup::Any]);
+    let (db, _dir) = open_db(vec![]);
 
     let data = b"hello world";
     let hash = keccak256(data);
 
     assert!(db.insert(&hash, data).unwrap());
     assert_eq!(db.get(&hash).unwrap().unwrap(), data);
-
-    let _ = fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn get_missing_returns_none() {
-    let (db, dir) = open_db("get_missing", vec![FileGroup::Any]);
+    let (db, _dir) = open_db(vec![]);
 
     let hash = keccak256(b"does not exist");
     assert!(db.get(&hash).unwrap().is_none());
-
-    let _ = fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn duplicate_insert_returns_false() {
-    let (db, dir) = open_db("dup_insert", vec![FileGroup::Any]);
+    let (db, _dir) = open_db(vec![]);
 
     let data = b"duplicate";
     let hash = keccak256(data);
@@ -57,13 +45,11 @@ fn duplicate_insert_returns_false() {
     assert!(db.insert(&hash, data).unwrap());
     assert!(!db.insert(&hash, data).unwrap());
     assert_eq!(db.len().unwrap(), 1);
-
-    let _ = fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn contains() {
-    let (db, dir) = open_db("contains", vec![FileGroup::Any]);
+    let (db, _dir) = open_db(vec![]);
 
     let data = b"present";
     let hash = keccak256(data);
@@ -73,13 +59,11 @@ fn contains() {
     db.insert(&hash, data).unwrap();
     assert!(db.contains(&hash).unwrap());
     assert!(!db.contains(&missing).unwrap());
-
-    let _ = fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn len_and_is_empty() {
-    let (db, dir) = open_db("len", vec![FileGroup::Any]);
+    let (db, _dir) = open_db(vec![]);
 
     assert!(db.is_empty().unwrap());
     assert_eq!(db.len().unwrap(), 0);
@@ -92,13 +76,11 @@ fn len_and_is_empty() {
 
     db.insert(&keccak256(d2), d2).unwrap();
     assert_eq!(db.len().unwrap(), 2);
-
-    let _ = fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn batch_insert() {
-    let (db, dir) = open_db("batch", vec![FileGroup::Any]);
+    let (db, _dir) = open_db(vec![]);
 
     let entries: Vec<([u8; 32], Vec<u8>)> = (0..100u32)
         .map(|i| {
@@ -114,13 +96,11 @@ fn batch_insert() {
     for (hash, data) in &entries {
         assert_eq!(db.get(hash).unwrap().unwrap(), *data);
     }
-
-    let _ = fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn batch_insert_deduplicates() {
-    let (db, dir) = open_db("batch_dedup", vec![FileGroup::Any]);
+    let (db, _dir) = open_db(vec![]);
 
     let data = b"already here";
     let hash = keccak256(data);
@@ -131,24 +111,19 @@ fn batch_insert_deduplicates() {
     let inserted = db.insert_batch(&entries).unwrap();
     assert_eq!(inserted, 1);
     assert_eq!(db.len().unwrap(), 2);
-
-    let _ = fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn batch_insert_empty() {
-    let (db, dir) = open_db("batch_empty", vec![FileGroup::Any]);
+    let (db, _dir) = open_db(vec![]);
 
     assert_eq!(db.insert_batch(&[]).unwrap(), 0);
     assert!(db.is_empty().unwrap());
-
-    let _ = fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn split_files() {
-    let groups = vec![FileGroup::Exact(4), FileGroup::Exact(32), FileGroup::Any];
-    let (db, dir) = open_db("split", groups);
+    let (db, _dir) = open_db(vec![4, 32]);
 
     let d4 = [0xAAu8; 4];
     let d32 = [0xBBu8; 32];
@@ -166,14 +141,12 @@ fn split_files() {
     assert_eq!(db.get(&h32).unwrap().unwrap(), d32);
     assert_eq!(db.get(&hvar).unwrap().unwrap(), dvar);
     assert_eq!(db.len().unwrap(), 3);
-
-    let _ = fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn reopen_preserves_data() {
-    let dir = tmp_dir("reopen");
-    let groups = vec![FileGroup::Exact(4), FileGroup::Any];
+    let dir = TempDir::new().unwrap();
+    let buckets = vec![4];
 
     let d4 = [0xCCu8; 4];
     let dvar = b"persisted across reopens";
@@ -181,23 +154,21 @@ fn reopen_preserves_data() {
     let hvar = keccak256(dvar);
 
     {
-        let db = PreimageDb::open(PreimageDbConfig::new(dir.clone(), groups.clone())).unwrap();
+        let db = PreimageDb::open(PreimageDbConfig::new(dir.path(), buckets.clone())).unwrap();
         db.insert(&h4, &d4).unwrap();
         db.insert(&hvar, dvar).unwrap();
         db.sync().unwrap();
     }
 
-    let db = PreimageDb::open(PreimageDbConfig::new(dir.clone(), groups)).unwrap();
+    let db = PreimageDb::open(PreimageDbConfig::new(dir.path(), buckets)).unwrap();
     assert_eq!(db.len().unwrap(), 2);
     assert_eq!(db.get(&h4).unwrap().unwrap(), d4);
     assert_eq!(db.get(&hvar).unwrap().unwrap(), dvar);
-
-    let _ = fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn various_sizes() {
-    let (db, dir) = open_db("sizes", vec![FileGroup::Any]);
+    let (db, _dir) = open_db(vec![]);
 
     let sizes = [0, 1, 31, 32, 33, 100, 1000, 10_000];
     for &size in &sizes {
@@ -208,6 +179,4 @@ fn various_sizes() {
     }
 
     assert_eq!(db.len().unwrap(), sizes.len());
-
-    // let _ = fs::remove_dir_all(&dir);
 }

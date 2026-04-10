@@ -9,4 +9,5 @@ libmdbx.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+tempfile.workspace = true
 tiny-keccak.workspace = true

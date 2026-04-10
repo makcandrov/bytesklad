@@ -390,6 +390,7 @@ version = "0.1.0"
 dependencies = [
  "flat-store",
  "libmdbx",
+ "tempfile",
  "thiserror",
  "tiny-keccak",
 ]
