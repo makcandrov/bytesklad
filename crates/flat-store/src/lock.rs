@@ -52,3 +52,25 @@ impl LockFile {
         Ok(Self(lock_file))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_lock_prevents_second_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let _lock = LockFile::new(dir.path()).unwrap();
+        assert!(matches!(LockFile::new(dir.path()), Err(Error::Locked)));
+    }
+
+    #[test]
+    fn test_lock_released_on_drop() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let _lock = LockFile::new(dir.path()).unwrap();
+        }
+        // Should succeed after the first lock is dropped.
+        let _lock = LockFile::new(dir.path()).unwrap();
+    }
+}
