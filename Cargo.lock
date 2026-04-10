@@ -160,9 +160,11 @@ name = "flat-store"
 version = "0.1.0"
 dependencies = [
  "hashbrown 0.17.0",
+ "libc",
  "parking_lot",
  "tempfile",
  "thiserror",
+ "windows-sys",
 ]
 
 [[package]]

@@ -21,3 +21,5 @@ libmdbx = "0.6"
 thiserror = "2"
 tempfile = "3"
 tiny-keccak = { version = "2", features = ["keccak"] }
+libc = "0.2"
+windows-sys = "0.61"

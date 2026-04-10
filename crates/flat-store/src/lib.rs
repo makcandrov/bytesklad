@@ -1,5 +1,8 @@
 mod file;
 use file::DataFile;
 
+mod lock;
+use lock::LockFile;
+
 mod store;
-pub use store::{FlatStore, FlatStoreError};
+pub use store::{Error, FlatStore};

@@ -2,15 +2,16 @@ use std::{fs, io, path::Path};
 
 use hashbrown::HashMap;
 
-use crate::DataFile;
+use crate::{DataFile, LockFile};
 
 pub struct FlatStore {
     sized_files: HashMap<usize, DataFile>,
     unsized_file: DataFile,
+    _lock_file: LockFile,
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum FlatStoreError {
+pub enum Error {
     #[error(transparent)]
     Io(#[from] io::Error),
 
@@ -22,9 +23,11 @@ impl FlatStore {
     pub fn open(
         path: impl AsRef<Path>,
         buckets: impl IntoIterator<Item = usize>,
-    ) -> Result<Self, FlatStoreError> {
+    ) -> Result<Self, Error> {
         let path = path.as_ref();
         fs::create_dir_all(path)?;
+
+        let lock_file = LockFile::new(path)?;
 
         let mut sized_files = HashMap::new();
 
@@ -38,6 +41,7 @@ impl FlatStore {
         Ok(Self {
             sized_files,
             unsized_file,
+            _lock_file: lock_file,
         })
     }
 
