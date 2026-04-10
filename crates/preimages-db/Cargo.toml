@@ -1,0 +1,12 @@
+[package]
+name = "preimages-db"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+flat-store.workspace = true
+libmdbx.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tiny-keccak.workspace = true
