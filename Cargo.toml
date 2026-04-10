@@ -23,3 +23,5 @@ tempfile = "3"
 tiny-keccak = { version = "2", features = ["keccak"] }
 libc = "0.2"
 windows-sys = "0.61"
+
+sdecode-preimages-interface = { git = "https://github.com/makcandrov/sdecode" }

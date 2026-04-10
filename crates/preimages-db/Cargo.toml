@@ -3,10 +3,14 @@ name = "preimages-db"
 version.workspace = true
 edition.workspace = true
 
+[features]
+sdecode = ["dep:sdecode-preimages-interface"]
+
 [dependencies]
 flat-store.workspace = true
 libmdbx.workspace = true
 thiserror.workspace = true
+sdecode-preimages-interface = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile.workspace = true

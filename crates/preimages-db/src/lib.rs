@@ -10,6 +10,9 @@ use flat_store::FlatStore;
 use libmdbx::{
     Database, DatabaseOptions, Mode, NoWriteMap, ReadWriteOptions, SyncMode, TableFlags, WriteFlags,
 };
+#[cfg(feature = "sdecode")]
+mod sdecode;
+
 use thiserror::Error;
 
 const MDBX_TABLE: &str = "preimages";
@@ -208,6 +211,46 @@ impl PreimageDb {
 
     pub fn is_empty(&self) -> Result<bool> {
         Ok(self.len()? == 0)
+    }
+
+    /// Returns the entry with the largest hash less than or equal to `hash`,
+    /// or `None` if no such entry exists.
+    pub fn nearest_lower(&self, hash: &[u8; 32]) -> Result<Option<([u8; 32], Vec<u8>)>> {
+        let tx = self.mdbx.begin_ro_txn()?;
+        let table = tx.open_table(Some(MDBX_TABLE))?;
+        let mut cursor = tx.cursor(&table)?;
+
+        let result = match cursor.set_range::<Vec<u8>, Vec<u8>>(hash.as_slice())? {
+            Some((key, value)) if key.as_slice() == hash.as_slice() => Some((key, value)),
+            _ => cursor.prev::<Vec<u8>, Vec<u8>>()?,
+        };
+
+        self.read_cursor_result(result)
+    }
+
+    /// Returns the entry with the smallest hash greater than or equal to `hash`,
+    /// or `None` if no such entry exists.
+    pub fn nearest_upper(&self, hash: &[u8; 32]) -> Result<Option<([u8; 32], Vec<u8>)>> {
+        let tx = self.mdbx.begin_ro_txn()?;
+        let table = tx.open_table(Some(MDBX_TABLE))?;
+        let mut cursor = tx.cursor(&table)?;
+
+        let result = cursor.set_range::<Vec<u8>, Vec<u8>>(hash.as_slice())?;
+
+        self.read_cursor_result(result)
+    }
+
+    fn read_cursor_result(
+        &self,
+        result: Option<(Vec<u8>, Vec<u8>)>,
+    ) -> Result<Option<([u8; 32], Vec<u8>)>> {
+        let Some((key, value)) = result else {
+            return Ok(None);
+        };
+        let hash: [u8; 32] = key.try_into().map_err(|_| Error::CorruptIndex)?;
+        let (offset, len) = decode_value(&value)?;
+        let data = self.store.read_to_vec(offset, len)?;
+        Ok(Some((hash, data)))
     }
 
     /// Flush all data files and MDBX to disk.
