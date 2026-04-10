@@ -21,6 +21,10 @@ impl Checkpoint {
         Self { path }
     }
 
+    fn tmp_path(&self) -> PathBuf {
+        self.path.with_extension("tmp")
+    }
+
     pub fn recover(
         &self,
         sized_files: &HashMap<usize, DataFile>,
@@ -29,9 +33,13 @@ impl Checkpoint {
     ) -> Result<(), io::Error> {
         let data = match fs::read(&self.path) {
             Ok(data) if data.len() >= ENTRY_SIZE && data.len() % ENTRY_SIZE == 0 => data,
-            Ok(_) => return Ok(()), // Corrupt or empty, treat as no checkpoint.
-            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
-            Err(e) => return Err(e),
+            Ok(_) | Err(_) => {
+                // Fall back to the tmp file in case the rename didn't complete.
+                match fs::read(self.tmp_path()) {
+                    Ok(data) if data.len() >= ENTRY_SIZE && data.len() % ENTRY_SIZE == 0 => data,
+                    _ => return Ok(()),
+                }
+            }
         };
 
         let entries: HashMap<u64, u64> = data
@@ -75,7 +83,7 @@ impl Checkpoint {
         buf.extend_from_slice(&u64::MAX.to_le_bytes());
         buf.extend_from_slice(&unsized_file.offset().to_le_bytes());
 
-        let tmp_path = self.path.with_extension("tmp");
+        let tmp_path = self.tmp_path();
         let mut file = OpenOptions::new()
             .create(true)
             .truncate(true)
