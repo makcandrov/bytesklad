@@ -564,17 +564,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "quick-impl"
-version = "0.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "02c2620548656d74583faa177270646b61b4ef855acf07b43f14cdc101316248"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn",
-]
-
-[[package]]
 name = "quote"
 version = "1.0.45"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -734,11 +723,10 @@ checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 [[package]]
 name = "sdecode-preimages-interface"
 version = "0.1.0"
-source = "git+https://github.com/makcandrov/sdecode#a178bfed7d13b2b2bd5eee9001acbd86f29b1346"
+source = "git+https://github.com/makcandrov/sdecode#3076cb1c0bb4fb11438a42f5e8e4dbd045ac8da8"
 dependencies = [
  "alloy-primitives",
  "auto_impl",
- "quick-impl",
 ]
 
 [[package]]

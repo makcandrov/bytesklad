@@ -1,5 +1,5 @@
 use sdecode_preimages_interface::{
-    Image, Preimage, PreimageEntry, PreimagesProvider, PreimagesWriter,
+    Image, Preimage, PreimageEntry, PreimagesProvider, PreimagesWriter, PreimageEntryRef
 };
 
 use crate::{Error, PreimageDb};
@@ -23,6 +23,10 @@ impl PreimagesProvider for PreimageDb {
         let data = self.get(image.as_ref())?;
         Ok(data.map(Preimage::from))
     }
+
+    fn is_empty(&self) -> Result<bool,Self::Error> {
+        self.is_empty()
+    }
 }
 
 impl PreimagesWriter for PreimageDb {
@@ -30,18 +34,18 @@ impl PreimagesWriter for PreimageDb {
 
     fn write_preimages<'a>(
         &self,
-        preimages: impl IntoIterator<Item = &'a PreimageEntry>,
-    ) -> crate::Result<()> {
-        let batch: Vec<([u8; 32], Vec<u8>)> = preimages
-            .into_iter()
-            .map(|e| (e.image().0, e.preimage().to_vec()))
-            .collect();
-        self.insert_batch(&batch)?;
+        preimages: impl IntoIterator<Item = impl Into<PreimageEntryRef<'a>>>,
+    ) -> Result<(), Self::Error> {
+        self.insert_batch(preimages.into_iter().map(|entry| {
+            let entry = entry.into();
+            entry.into()
+        }))?;
         Ok(())
     }
 
-    fn write_preimage_entry(&self, preimage: &PreimageEntry) -> Result<(), Self::Error> {
-        self.insert(preimage.image_ref().as_ref(), preimage.preimage())?;
+    fn write_preimage_entry<'a>(&self, entry: impl Into<PreimageEntryRef<'a>>) -> Result<(), Self::Error> {
+        let entry = entry.into();
+        self.insert(entry.image_ref().as_ref(), entry.preimage())?;
         Ok(())
     }
 }

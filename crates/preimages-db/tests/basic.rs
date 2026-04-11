@@ -89,7 +89,7 @@ fn batch_insert() {
         })
         .collect();
 
-    let inserted = db.insert_batch(&entries).unwrap();
+    let inserted = db.insert_batch(entries.iter().map(|(h, d)| (h, d.as_slice()))).unwrap();
     assert_eq!(inserted, 100);
     assert_eq!(db.len().unwrap(), 100);
 
@@ -106,9 +106,9 @@ fn batch_insert_deduplicates() {
     let hash = keccak256(data);
     db.insert(&hash, data).unwrap();
 
-    let entries = vec![(hash, data.to_vec()), (keccak256(b"new"), b"new".to_vec())];
+    let entries = [(hash, data.to_vec()), (keccak256(b"new"), b"new".to_vec())];
 
-    let inserted = db.insert_batch(&entries).unwrap();
+    let inserted = db.insert_batch(entries.iter().map(|(h, d)| (h, d.as_slice()))).unwrap();
     assert_eq!(inserted, 1);
     assert_eq!(db.len().unwrap(), 2);
 }
@@ -117,7 +117,7 @@ fn batch_insert_deduplicates() {
 fn batch_insert_empty() {
     let (db, _dir) = open_db(vec![]);
 
-    assert_eq!(db.insert_batch(&[]).unwrap(), 0);
+    assert_eq!(db.insert_batch(std::iter::empty()).unwrap(), 0);
     assert!(db.is_empty().unwrap());
 }
 

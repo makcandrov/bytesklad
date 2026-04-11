@@ -132,17 +132,17 @@ impl PreimageDb {
             WriteFlags::NO_OVERWRITE,
         )?;
         tx.commit()?;
+        self.mdbx.sync(true)?;
 
         Ok(true)
     }
 
     /// Insert a batch of preimages. Returns the number of new entries.
-    pub fn insert_batch(&self, entries: &[([u8; 32], Vec<u8>)]) -> Result<usize> {
-        if entries.is_empty() {
-            return Ok(0);
-        }
-
-        let mut to_insert = Vec::with_capacity(entries.len());
+    pub fn insert_batch<'a>(
+        &self,
+        entries: impl IntoIterator<Item = (&'a [u8; 32], &'a [u8])>,
+    ) -> Result<usize> {
+        let mut to_insert: Vec<_> = Vec::new();
         {
             let tx = self.mdbx.begin_ro_txn()?;
             let table = tx.open_table(Some(MDBX_TABLE))?;
@@ -176,6 +176,7 @@ impl PreimageDb {
             )?;
         }
         tx.commit()?;
+        self.mdbx.sync(true)?;
 
         Ok(count)
     }
@@ -251,12 +252,5 @@ impl PreimageDb {
         let (offset, len) = decode_value(&value)?;
         let data = self.store.read_to_vec(offset, len)?;
         Ok(Some((hash, data)))
-    }
-
-    /// Flush all data files and MDBX to disk.
-    pub fn sync(&self) -> Result<()> {
-        self.store.sync()?;
-        self.mdbx.sync(true)?;
-        Ok(())
     }
 }
