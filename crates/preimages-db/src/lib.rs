@@ -7,20 +7,30 @@ use std::fs;
 use std::path::PathBuf;
 
 use flat_store::FlatStore;
+pub use flat_store::{Mode, RO, RW};
 use libmdbx::{
-    Database, DatabaseOptions, Mode, NoWriteMap, ReadWriteOptions, SyncMode, TableFlags, WriteFlags,
+    Database, DatabaseOptions, Mode as MdbxMode, NoWriteMap, ReadWriteOptions, SyncMode,
+    TableFlags, WriteFlags,
 };
+
 #[cfg(feature = "sdecode")]
 mod sdecode;
 
-use thiserror::Error;
-
+/// Name of the MDBX table that stores the `hash → (offset, len)` index.
 const MDBX_TABLE: &str = "preimages";
+
+/// Size in bytes of an MDBX value: 8-byte little-endian offset followed by
+/// 4-byte little-endian length.
 const VALUE_LEN: usize = 12;
+
+/// Maximum size (1 TB) of the MDBX memory map. This is a virtual address
+/// reservation, not on-disk allocation — the file grows on demand within
+/// this limit. Sized to comfortably exceed any expected index footprint.
+const MDBX_MAP_SIZE: isize = 1024 * 1024 * 1024 * 1024;
 
 // ── Error ────────────────────────────────────────────────────────────
 
-#[derive(Debug, Error)]
+#[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
@@ -46,7 +56,7 @@ fn encode_value(offset: u64, len: u32) -> [u8; VALUE_LEN] {
     buf
 }
 
-fn decode_value(raw: &[u8]) -> std::result::Result<(u64, usize), Error> {
+fn decode_value(raw: &[u8]) -> Result<(u64, usize)> {
     if raw.len() != VALUE_LEN {
         return Err(Error::CorruptIndex);
     }
@@ -64,8 +74,6 @@ pub struct PreimageDbConfig {
     /// Bucket sizes for the flat store. Preimages whose length matches a
     /// bucket go into a dedicated file; all others go into the unsized file.
     pub buckets: Vec<usize>,
-    /// MDBX map size. Default: 64 GB.
-    pub mdbx_map_size: usize,
 }
 
 impl PreimageDbConfig {
@@ -73,28 +81,29 @@ impl PreimageDbConfig {
         Self {
             path: path.into(),
             buckets,
-            mdbx_map_size: 64 * 1024 * 1024 * 1024,
         }
     }
 }
 
 // ── PreimageDb ───────────────────────────────────────────────────────
 
-pub struct PreimageDb {
+pub struct PreimageDb<M: Mode = RW> {
     mdbx: Database<NoWriteMap>,
-    store: FlatStore,
+    store: FlatStore<M>,
 }
 
-impl PreimageDb {
+impl PreimageDb<RW> {
+    /// Open the database in read-write mode. Only one writer may hold the
+    /// database open at a time.
     pub fn open(config: PreimageDbConfig) -> Result<Self> {
         fs::create_dir_all(&config.path)?;
 
         let mdbx = Database::<NoWriteMap>::open_with_options(
             &config.path,
             DatabaseOptions {
-                mode: Mode::ReadWrite(ReadWriteOptions {
+                mode: MdbxMode::ReadWrite(ReadWriteOptions {
                     sync_mode: SyncMode::SafeNoSync,
-                    max_size: Some(config.mdbx_map_size as isize),
+                    max_size: Some(MDBX_MAP_SIZE),
                     ..Default::default()
                 }),
                 max_tables: Some(1),
@@ -180,7 +189,28 @@ impl PreimageDb {
 
         Ok(count)
     }
+}
 
+impl PreimageDb<RO> {
+    /// Open the database in read-only mode. Any number of read-only handles
+    /// may coexist with a single writer.
+    pub fn open_read_only(config: PreimageDbConfig) -> Result<Self> {
+        let mdbx = Database::<NoWriteMap>::open_with_options(
+            &config.path,
+            DatabaseOptions {
+                mode: MdbxMode::ReadOnly,
+                max_tables: Some(1),
+                ..Default::default()
+            },
+        )?;
+
+        let store = FlatStore::<RO>::open_read_only(config.path.join("data"), config.buckets)?;
+
+        Ok(Self { mdbx, store })
+    }
+}
+
+impl<M: Mode> PreimageDb<M> {
     /// Look up a preimage by its keccak256 hash.
     pub fn get(&self, hash: &[u8; 32]) -> Result<Option<Vec<u8>>> {
         let tx = self.mdbx.begin_ro_txn()?;

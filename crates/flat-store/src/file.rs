@@ -7,8 +7,9 @@ use std::{
 use parking_lot::Mutex;
 
 pub(crate) struct DataFile {
-    writer: Mutex<Writer>,
+    writer: Option<Mutex<Writer>>,
     reader: File,
+    read_only_len: u64,
 }
 
 struct Writer {
@@ -22,16 +23,30 @@ impl DataFile {
         let reader = OpenOptions::new().read(true).open(path)?;
         let write_offset = writer.metadata()?.len();
         Ok(Self {
-            writer: Mutex::new(Writer {
+            writer: Some(Mutex::new(Writer {
                 file: writer,
                 offset: write_offset,
-            }),
+            })),
             reader,
+            read_only_len: 0,
+        })
+    }
+
+    pub fn open_read_only(path: impl AsRef<Path>) -> Result<Self, io::Error> {
+        let reader = OpenOptions::new().read(true).open(&path)?;
+        let len = reader.metadata()?.len();
+        Ok(Self {
+            writer: None,
+            reader,
+            read_only_len: len,
         })
     }
 
     pub fn append(&self, data: &[u8]) -> Result<u64, io::Error> {
-        let mut w = self.writer.lock();
+        let writer = self.writer.as_ref().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::PermissionDenied, "data file is read-only")
+        })?;
+        let mut w = writer.lock();
         let offset = w.offset;
         w.file.write_all(data)?;
         w.offset += data.len() as u64;
@@ -57,18 +72,26 @@ impl DataFile {
     }
 
     pub fn offset(&self) -> u64 {
-        self.writer.lock().offset
+        match &self.writer {
+            Some(w) => w.lock().offset,
+            None => self.read_only_len,
+        }
     }
 
     pub fn truncate(&self, offset: u64) -> Result<(), io::Error> {
-        let mut w = self.writer.lock();
+        let writer = self.writer.as_ref().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::PermissionDenied, "data file is read-only")
+        })?;
+        let mut w = writer.lock();
         w.file.set_len(offset)?;
         w.offset = offset;
         Ok(())
     }
 
     pub fn sync(&self) -> Result<(), io::Error> {
-        self.writer.lock().file.sync_data()?;
+        if let Some(w) = &self.writer {
+            w.lock().file.sync_data()?;
+        }
         Ok(())
     }
 }

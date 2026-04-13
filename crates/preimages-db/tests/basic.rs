@@ -89,7 +89,9 @@ fn batch_insert() {
         })
         .collect();
 
-    let inserted = db.insert_batch(entries.iter().map(|(h, d)| (h, d.as_slice()))).unwrap();
+    let inserted = db
+        .insert_batch(entries.iter().map(|(h, d)| (h, d.as_slice())))
+        .unwrap();
     assert_eq!(inserted, 100);
     assert_eq!(db.len().unwrap(), 100);
 
@@ -108,7 +110,9 @@ fn batch_insert_deduplicates() {
 
     let entries = [(hash, data.to_vec()), (keccak256(b"new"), b"new".to_vec())];
 
-    let inserted = db.insert_batch(entries.iter().map(|(h, d)| (h, d.as_slice()))).unwrap();
+    let inserted = db
+        .insert_batch(entries.iter().map(|(h, d)| (h, d.as_slice())))
+        .unwrap();
     assert_eq!(inserted, 1);
     assert_eq!(db.len().unwrap(), 2);
 }
@@ -157,7 +161,6 @@ fn reopen_preserves_data() {
         let db = PreimageDb::open(PreimageDbConfig::new(dir.path(), buckets.clone())).unwrap();
         db.insert(&h4, &d4).unwrap();
         db.insert(&hvar, dvar).unwrap();
-        db.sync().unwrap();
     }
 
     let db = PreimageDb::open(PreimageDbConfig::new(dir.path(), buckets)).unwrap();
