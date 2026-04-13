@@ -8,8 +8,7 @@ use parking_lot::Mutex;
 
 pub(crate) struct DataFile {
     writer: Option<Mutex<Writer>>,
-    reader: File,
-    read_only_len: u64,
+    reader: Reader,
 }
 
 struct Writer {
@@ -17,44 +16,39 @@ struct Writer {
     offset: u64,
 }
 
-impl DataFile {
-    pub fn open(path: impl AsRef<Path>) -> Result<Self, io::Error> {
-        let writer = OpenOptions::new().create(true).append(true).open(&path)?;
-        let reader = OpenOptions::new().read(true).open(path)?;
-        let write_offset = writer.metadata()?.len();
-        Ok(Self {
-            writer: Some(Mutex::new(Writer {
-                file: writer,
-                offset: write_offset,
-            })),
-            reader,
-            read_only_len: 0,
-        })
-    }
+struct Reader {
+    file: File,
+}
 
-    pub fn open_read_only(path: impl AsRef<Path>) -> Result<Self, io::Error> {
-        let reader = OpenOptions::new().read(true).open(&path)?;
-        let len = reader.metadata()?.len();
-        Ok(Self {
-            writer: None,
-            reader,
-            read_only_len: len,
-        })
-    }
-
-    pub fn append(&self, data: &[u8]) -> Result<u64, io::Error> {
-        let writer = self.writer.as_ref().ok_or_else(|| {
-            io::Error::new(io::ErrorKind::PermissionDenied, "data file is read-only")
-        })?;
-        let mut w = writer.lock();
-        let offset = w.offset;
-        w.file.write_all(data)?;
-        w.offset += data.len() as u64;
-        Ok(offset)
+impl Reader {
+    pub fn new(path: impl AsRef<Path>) -> Result<Self, io::Error> {
+        let file = OpenOptions::new().read(true).open(&path)?;
+        Ok(Self { file })
     }
 
     pub fn read(&self, buf: &mut [u8], offset: u64) -> Result<(), io::Error> {
-        read_at(buf, &self.reader, offset)
+        #[cfg(unix)]
+        fn read_at(buf: &mut [u8], file: &File, offset: u64) -> Result<(), io::Error> {
+            use std::os::unix::fs::FileExt;
+            file.read_exact_at(buf, offset)
+        }
+
+        #[cfg(windows)]
+        fn read_at(buf: &mut [u8], file: &File, offset: u64) -> Result<(), io::Error> {
+            use std::os::windows::fs::FileExt;
+            let len = buf.len();
+            let mut pos = 0;
+            while pos < len {
+                let n = file.seek_read(&mut buf[pos..], offset + pos as u64)?;
+                if n == 0 {
+                    return Err(io::Error::from(io::ErrorKind::UnexpectedEof));
+                }
+                pos += n;
+            }
+            Ok(())
+        }
+
+        read_at(buf, &self.file, offset)
     }
 
     #[cfg(test)]
@@ -70,51 +64,92 @@ impl DataFile {
         self.read(&mut buf, offset)?;
         Ok(buf)
     }
+}
 
+impl Writer {
+    pub fn new(path: impl AsRef<Path>) -> Result<Self, io::Error> {
+        let file = OpenOptions::new().create(true).append(true).open(&path)?;
+        let offset = file.metadata()?.len();
+        Ok(Self { file, offset })
+    }
+
+    pub fn append(&mut self, data: &[u8]) -> Result<u64, io::Error> {
+        let offset = self.offset;
+        self.file.write_all(data)?;
+        self.offset += data.len() as u64;
+        Ok(offset)
+    }
+
+    pub fn truncate(&mut self, offset: u64) -> Result<(), io::Error> {
+        self.file.set_len(offset)?;
+        self.offset = offset;
+        Ok(())
+    }
+
+    pub fn sync(&mut self) -> Result<(), io::Error> {
+        self.file.sync_data()
+    }
+}
+
+impl DataFile {
+    pub fn open(path: impl AsRef<Path>) -> Result<Self, io::Error> {
+        Ok(Self {
+            writer: Some(Mutex::new(Writer::new(&path)?)),
+            reader: Reader::new(&path)?,
+        })
+    }
+
+    pub fn open_read_only(path: impl AsRef<Path>) -> Result<Self, io::Error> {
+        Ok(Self {
+            writer: None,
+            reader: Reader::new(path)?,
+        })
+    }
+
+    pub fn append(&self, data: &[u8]) -> Result<u64, io::Error> {
+        let writer = self.writer.as_ref().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::PermissionDenied, "data file is read-only")
+        })?;
+        writer.lock().append(data)
+    }
+
+    pub fn read(&self, buf: &mut [u8], offset: u64) -> Result<(), io::Error> {
+        self.reader.read(buf, offset)
+    }
+
+    #[cfg(test)]
+    pub fn read_to_vec(&self, offset: u64, len: usize) -> Result<Vec<u8>, io::Error> {
+        self.reader.read_to_vec(offset, len)
+    }
+
+    #[cfg(test)]
+    pub fn read_to_array<const N: usize>(&self, offset: u64) -> Result<[u8; N], io::Error> {
+        self.reader.read_to_array(offset)
+    }
+
+    /// Current write offset. Only valid in read-write mode; panics if the file
+    /// was opened read-only.
     pub fn offset(&self) -> u64 {
-        match &self.writer {
-            Some(w) => w.lock().offset,
-            None => self.read_only_len,
-        }
+        self.writer
+            .as_ref()
+            .expect("offset() called on read-only DataFile")
+            .lock()
+            .offset
     }
 
     pub fn truncate(&self, offset: u64) -> Result<(), io::Error> {
         let writer = self.writer.as_ref().ok_or_else(|| {
             io::Error::new(io::ErrorKind::PermissionDenied, "data file is read-only")
         })?;
-        let mut w = writer.lock();
-        w.file.set_len(offset)?;
-        w.offset = offset;
-        Ok(())
+        writer.lock().truncate(offset)
     }
 
     pub fn sync(&self) -> Result<(), io::Error> {
-        if let Some(w) = &self.writer {
-            w.lock().file.sync_data()?;
-        }
-        Ok(())
+        let writer = self.writer.as_ref().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::PermissionDenied, "data file is read-only")
+        })?;
+        writer.lock().sync()
     }
-}
-
-#[cfg(unix)]
-fn read_at(buf: &mut [u8], file: &File, offset: u64) -> Result<(), io::Error> {
-    use std::os::unix::fs::FileExt;
-    file.read_exact_at(buf, offset)
-}
-
-#[cfg(windows)]
-fn read_at(buf: &mut [u8], file: &File, offset: u64) -> Result<(), io::Error> {
-    use std::os::windows::fs::FileExt;
-    let len = buf.len();
-    let mut pos = 0;
-    while pos < len {
-        let n = file.seek_read(&mut buf[pos..], offset + pos as u64)?;
-        if n == 0 {
-            return Err(io::Error::from(io::ErrorKind::UnexpectedEof));
-        }
-        pos += n;
-    }
-    Ok(())
 }
 
 #[cfg(test)]
