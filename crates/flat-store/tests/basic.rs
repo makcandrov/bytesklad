@@ -1,6 +1,6 @@
 use std::{fs, path::PathBuf};
 
-use flat_store::FlatStore;
+use flat_store::{FlatStoreRW, FlatStoreRead, FlatStoreWrite};
 
 fn tmp_dir(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("flat_store_test_{name}_{}", std::process::id()));
@@ -11,7 +11,7 @@ fn tmp_dir(name: &str) -> PathBuf {
 #[test]
 fn single_file_roundtrip() {
     let dir = tmp_dir("single");
-    let store = FlatStore::open(&dir, vec![]).unwrap();
+    let store = FlatStoreRW::open(&dir, vec![]).unwrap();
 
     let data = b"hello world";
     let r = store.insert(data).unwrap();
@@ -23,7 +23,7 @@ fn single_file_roundtrip() {
 #[test]
 fn split_files_roundtrip() {
     let dir = tmp_dir("split");
-    let store = FlatStore::open(&dir, [4, 8]).unwrap();
+    let store = FlatStoreRW::open(&dir, [4, 8]).unwrap();
 
     let d4 = &[1u8, 2, 3, 4];
     let d8 = &[10u8, 20, 30, 40, 50, 60, 70, 80];

@@ -1,11 +1,11 @@
-use flat_store::{Mode, RW};
+use flat_store::{FlatStoreRW, FlatStoreRead};
 use sdecode_preimages_interface::{
     Image, Preimage, PreimageEntry, PreimageEntryRef, PreimagesProvider, PreimagesWriter,
 };
 
 use crate::{Error, PreimageDb};
 
-impl<M: Mode> PreimagesProvider for PreimageDb<M> {
+impl<S: FlatStoreRead> PreimagesProvider for PreimageDb<S> {
     type Error = Error;
 
     fn nearest_lower_preimage(&self, image: &Image) -> crate::Result<Option<PreimageEntry>> {
@@ -30,7 +30,7 @@ impl<M: Mode> PreimagesProvider for PreimageDb<M> {
     }
 }
 
-impl PreimagesWriter for PreimageDb<RW> {
+impl PreimagesWriter for PreimageDb<FlatStoreRW> {
     type Error = Error;
 
     fn write_preimages<'a>(

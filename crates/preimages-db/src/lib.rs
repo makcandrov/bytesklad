@@ -6,8 +6,7 @@
 use std::fs;
 use std::path::PathBuf;
 
-use flat_store::FlatStore;
-pub use flat_store::{Mode, RO, RW};
+pub use flat_store::{FlatStoreRW, FlatStoreRead, FlatStoreReader, FlatStoreWrite};
 use libmdbx::{
     Database, DatabaseOptions, Mode as MdbxMode, NoWriteMap, ReadWriteOptions, SyncMode,
     TableFlags, WriteFlags,
@@ -87,12 +86,12 @@ impl PreimageDbConfig {
 
 // ── PreimageDb ───────────────────────────────────────────────────────
 
-pub struct PreimageDb<M: Mode = RW> {
+pub struct PreimageDb<S = FlatStoreRW> {
     mdbx: Database<NoWriteMap>,
-    store: FlatStore<M>,
+    store: S,
 }
 
-impl PreimageDb<RW> {
+impl PreimageDb<FlatStoreRW> {
     /// Open the database in read-write mode. Only one writer may hold the
     /// database open at a time.
     pub fn open(config: PreimageDbConfig) -> Result<Self> {
@@ -117,7 +116,7 @@ impl PreimageDb<RW> {
             tx.commit()?;
         }
 
-        let store = FlatStore::open(config.path.join("data"), config.buckets)?;
+        let store = FlatStoreRW::open(config.path.join("data"), config.buckets)?;
 
         Ok(Self { mdbx, store })
     }
@@ -191,7 +190,7 @@ impl PreimageDb<RW> {
     }
 }
 
-impl PreimageDb<RO> {
+impl PreimageDb<FlatStoreReader> {
     /// Open the database in read-only mode. Any number of read-only handles
     /// may coexist with a single writer.
     pub fn open_read_only(config: PreimageDbConfig) -> Result<Self> {
@@ -204,13 +203,13 @@ impl PreimageDb<RO> {
             },
         )?;
 
-        let store = FlatStore::<RO>::open_read_only(config.path.join("data"), config.buckets)?;
+        let store = FlatStoreReader::open(config.path.join("data"), config.buckets)?;
 
         Ok(Self { mdbx, store })
     }
 }
 
-impl<M: Mode> PreimageDb<M> {
+impl<S: FlatStoreRead> PreimageDb<S> {
     /// Look up a preimage by its keccak256 hash.
     pub fn get(&self, hash: &[u8; 32]) -> Result<Option<Vec<u8>>> {
         let tx = self.mdbx.begin_ro_txn()?;

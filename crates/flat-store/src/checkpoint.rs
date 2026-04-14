@@ -6,7 +6,7 @@ use std::{
 
 use hashbrown::HashMap;
 
-use crate::DataFile;
+use crate::DataFileRW;
 
 /// Each entry is 16 bytes: bucket size (u64 LE) + offset (u64 LE).
 /// u64::MAX as bucket means the unsized file.
@@ -27,8 +27,8 @@ impl Checkpoint {
 
     pub fn recover(
         &self,
-        sized_files: &HashMap<usize, DataFile>,
-        unsized_file: &DataFile,
+        sized_files: &HashMap<usize, DataFileRW>,
+        unsized_file: &DataFileRW,
         buckets: &[usize],
     ) -> Result<(), io::Error> {
         let data = match fs::read(&self.path) {
@@ -71,8 +71,8 @@ impl Checkpoint {
 
     pub fn write(
         &self,
-        sized_files: &HashMap<usize, DataFile>,
-        unsized_file: &DataFile,
+        sized_files: &HashMap<usize, DataFileRW>,
+        unsized_file: &DataFileRW,
     ) -> Result<(), io::Error> {
         let mut buf = Vec::with_capacity((sized_files.len() + 1) * ENTRY_SIZE);
         for (&bucket, file) in sized_files {

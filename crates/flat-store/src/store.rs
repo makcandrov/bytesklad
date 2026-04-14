@@ -1,16 +1,8 @@
-use std::{fs, io, marker::PhantomData, path::Path};
+use std::{fs, io, path::Path};
 
 use hashbrown::HashMap;
 
-use crate::{Checkpoint, DataFile, LockFile, Mode, RO, RW};
-
-pub struct FlatStore<M: Mode = RW> {
-    sized_files: HashMap<usize, DataFile>,
-    unsized_file: DataFile,
-    checkpoint: Option<Checkpoint>,
-    _lock_file: Option<LockFile>,
-    _mode: PhantomData<M>,
-}
+use crate::{Checkpoint, DataFileRO, DataFileRW, FlatStoreRead, FlatStoreWrite, LockFile};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -21,7 +13,23 @@ pub enum Error {
     Locked,
 }
 
-impl FlatStore<RW> {
+/// Read-write flat store. Only one writer may hold the store open at a time;
+/// the lock is enforced via a lock file in the store directory.
+pub struct FlatStoreRW {
+    sized_files: HashMap<usize, DataFileRW>,
+    unsized_file: DataFileRW,
+    checkpoint: Checkpoint,
+    _lock_file: LockFile,
+}
+
+/// Read-only flat store. Any number of read-only handles may coexist with a
+/// single writer — no lock is taken and no recovery is run.
+pub struct FlatStoreReader {
+    sized_files: HashMap<usize, DataFileRO>,
+    unsized_file: DataFileRO,
+}
+
+impl FlatStoreRW {
     pub fn open(
         path: impl AsRef<Path>,
         buckets: impl IntoIterator<Item = usize>,
@@ -35,11 +43,11 @@ impl FlatStore<RW> {
         let buckets: Vec<usize> = buckets.into_iter().collect();
 
         for &bucket in &buckets {
-            let file = DataFile::open(path.join(format!("size_{bucket}")))?;
+            let file = DataFileRW::open(path.join(format!("size_{bucket}")))?;
             sized_files.insert(bucket, file);
         }
 
-        let unsized_file = DataFile::open(path.join("unsized"))?;
+        let unsized_file = DataFileRW::open(path.join("unsized"))?;
 
         let checkpoint = Checkpoint::new(path.join("checkpoint"));
         checkpoint.recover(&sized_files, &unsized_file, &buckets)?;
@@ -47,34 +55,18 @@ impl FlatStore<RW> {
         Ok(Self {
             sized_files,
             unsized_file,
-            checkpoint: Some(checkpoint),
-            _lock_file: Some(lock_file),
-            _mode: PhantomData,
+            checkpoint,
+            _lock_file: lock_file,
         })
     }
 
-    pub fn insert(&self, data: &[u8]) -> Result<u64, io::Error> {
-        self.file(data.len()).append(data)
-    }
-
-    /// Flush all data files to disk and write a checkpoint.
-    pub fn sync(&self) -> Result<(), io::Error> {
-        for file in self.sized_files.values() {
-            file.sync()?;
-        }
-        self.unsized_file.sync()?;
-        self.checkpoint
-            .as_ref()
-            .expect("checkpoint is always present in RW mode")
-            .write(&self.sized_files, &self.unsized_file)?;
-        Ok(())
+    fn file(&self, bucket: usize) -> &DataFileRW {
+        self.sized_files.get(&bucket).unwrap_or(&self.unsized_file)
     }
 }
 
-impl FlatStore<RO> {
-    /// Open the store in read-only mode. Any number of read-only handles may
-    /// coexist with a single writer — no lock is taken and no recovery is run.
-    pub fn open_read_only(
+impl FlatStoreReader {
+    pub fn open(
         path: impl AsRef<Path>,
         buckets: impl IntoIterator<Item = usize>,
     ) -> Result<Self, Error> {
@@ -83,7 +75,7 @@ impl FlatStore<RO> {
         let mut sized_files = HashMap::new();
         for bucket in buckets {
             let file_path = path.join(format!("size_{bucket}"));
-            match DataFile::open_read_only(&file_path) {
+            match DataFileRO::open(&file_path) {
                 Ok(file) => {
                     sized_files.insert(bucket, file);
                 }
@@ -92,36 +84,43 @@ impl FlatStore<RO> {
             }
         }
 
-        let unsized_file = DataFile::open_read_only(path.join("unsized"))?;
+        let unsized_file = DataFileRO::open(path.join("unsized"))?;
 
         Ok(Self {
             sized_files,
             unsized_file,
-            checkpoint: None,
-            _lock_file: None,
-            _mode: PhantomData,
         })
+    }
+
+    fn file(&self, bucket: usize) -> &DataFileRO {
+        self.sized_files.get(&bucket).unwrap_or(&self.unsized_file)
     }
 }
 
-impl<M: Mode> FlatStore<M> {
-    fn file(&self, bucket: usize) -> &DataFile {
-        self.sized_files.get(&bucket).unwrap_or(&self.unsized_file)
-    }
-
-    pub fn read(&self, buf: &mut [u8], offset: u64) -> Result<(), io::Error> {
+impl FlatStoreRead for FlatStoreRW {
+    fn read(&self, buf: &mut [u8], offset: u64) -> Result<(), io::Error> {
         self.file(buf.len()).read(buf, offset)
     }
+}
 
-    pub fn read_to_vec(&self, offset: u64, len: usize) -> Result<Vec<u8>, io::Error> {
-        let mut buf = vec![0; len];
-        self.read(&mut buf, offset)?;
-        Ok(buf)
+impl FlatStoreWrite for FlatStoreRW {
+    fn insert(&self, data: &[u8]) -> Result<u64, io::Error> {
+        self.file(data.len()).insert(data)
     }
 
-    pub fn read_to_array<const N: usize>(&self, offset: u64) -> Result<[u8; N], io::Error> {
-        let mut buf = [0; N];
-        self.read(&mut buf, offset)?;
-        Ok(buf)
+    fn sync(&self) -> Result<(), io::Error> {
+        for file in self.sized_files.values() {
+            file.sync()?;
+        }
+        self.unsized_file.sync()?;
+        self.checkpoint
+            .write(&self.sized_files, &self.unsized_file)?;
+        Ok(())
+    }
+}
+
+impl FlatStoreRead for FlatStoreReader {
+    fn read(&self, buf: &mut [u8], offset: u64) -> Result<(), io::Error> {
+        self.file(buf.len()).read(buf, offset)
     }
 }

@@ -6,8 +6,14 @@ use std::{
 
 use parking_lot::Mutex;
 
-pub(crate) struct DataFile {
-    writer: Option<Mutex<Writer>>,
+use crate::{FlatStoreRead, FlatStoreWrite};
+
+pub(crate) struct DataFileRW {
+    writer: Mutex<Writer>,
+    reader: Reader,
+}
+
+pub(crate) struct DataFileRO {
     reader: Reader,
 }
 
@@ -50,20 +56,6 @@ impl Reader {
 
         read_at(buf, &self.file, offset)
     }
-
-    #[cfg(test)]
-    pub fn read_to_vec(&self, offset: u64, len: usize) -> Result<Vec<u8>, io::Error> {
-        let mut buf = vec![0; len];
-        self.read(&mut buf, offset)?;
-        Ok(buf)
-    }
-
-    #[cfg(test)]
-    pub fn read_to_array<const N: usize>(&self, offset: u64) -> Result<[u8; N], io::Error> {
-        let mut buf = [0; N];
-        self.read(&mut buf, offset)?;
-        Ok(buf)
-    }
 }
 
 impl Writer {
@@ -91,64 +83,50 @@ impl Writer {
     }
 }
 
-impl DataFile {
+impl DataFileRW {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, io::Error> {
         Ok(Self {
-            writer: Some(Mutex::new(Writer::new(&path)?)),
+            writer: Mutex::new(Writer::new(&path)?),
             reader: Reader::new(&path)?,
         })
     }
 
-    pub fn open_read_only(path: impl AsRef<Path>) -> Result<Self, io::Error> {
-        Ok(Self {
-            writer: None,
-            reader: Reader::new(path)?,
-        })
-    }
-
-    pub fn append(&self, data: &[u8]) -> Result<u64, io::Error> {
-        let writer = self.writer.as_ref().ok_or_else(|| {
-            io::Error::new(io::ErrorKind::PermissionDenied, "data file is read-only")
-        })?;
-        writer.lock().append(data)
-    }
-
-    pub fn read(&self, buf: &mut [u8], offset: u64) -> Result<(), io::Error> {
-        self.reader.read(buf, offset)
-    }
-
-    #[cfg(test)]
-    pub fn read_to_vec(&self, offset: u64, len: usize) -> Result<Vec<u8>, io::Error> {
-        self.reader.read_to_vec(offset, len)
-    }
-
-    #[cfg(test)]
-    pub fn read_to_array<const N: usize>(&self, offset: u64) -> Result<[u8; N], io::Error> {
-        self.reader.read_to_array(offset)
-    }
-
-    /// Current write offset. Only valid in read-write mode; panics if the file
-    /// was opened read-only.
     pub fn offset(&self) -> u64 {
-        self.writer
-            .as_ref()
-            .expect("offset() called on read-only DataFile")
-            .lock()
-            .offset
+        self.writer.lock().offset
     }
 
     pub fn truncate(&self, offset: u64) -> Result<(), io::Error> {
-        let writer = self.writer.as_ref().ok_or_else(|| {
-            io::Error::new(io::ErrorKind::PermissionDenied, "data file is read-only")
-        })?;
-        writer.lock().truncate(offset)
+        self.writer.lock().truncate(offset)
+    }
+}
+
+impl DataFileRO {
+    pub fn open(path: impl AsRef<Path>) -> Result<Self, io::Error> {
+        Ok(Self {
+            reader: Reader::new(path)?,
+        })
+    }
+}
+
+impl FlatStoreRead for DataFileRW {
+    fn read(&self, buf: &mut [u8], offset: u64) -> Result<(), io::Error> {
+        self.reader.read(buf, offset)
+    }
+}
+
+impl FlatStoreWrite for DataFileRW {
+    fn insert(&self, data: &[u8]) -> Result<u64, io::Error> {
+        self.writer.lock().append(data)
     }
 
-    pub fn sync(&self) -> Result<(), io::Error> {
-        let writer = self.writer.as_ref().ok_or_else(|| {
-            io::Error::new(io::ErrorKind::PermissionDenied, "data file is read-only")
-        })?;
-        writer.lock().sync()
+    fn sync(&self) -> Result<(), io::Error> {
+        self.writer.lock().sync()
+    }
+}
+
+impl FlatStoreRead for DataFileRO {
+    fn read(&self, buf: &mut [u8], offset: u64) -> Result<(), io::Error> {
+        self.reader.read(buf, offset)
     }
 }
 
@@ -160,15 +138,15 @@ mod tests {
     #[test]
     fn test_append_and_read() {
         let tmp = NamedTempFile::new().unwrap();
-        let data_file = DataFile::open(tmp.path()).unwrap();
+        let data_file = DataFileRW::open(tmp.path()).unwrap();
 
         let a = vec![0, 1, 2, 3, 4, 5, 6, 7, 8];
         let b = [0, 1, 2, 3];
         let c = [0, 1, 2, 3, 4, 5, 6];
 
-        let ao = data_file.append(&a).unwrap();
-        let bo = data_file.append(&b).unwrap();
-        let co = data_file.append(&c).unwrap();
+        let ao = data_file.insert(&a).unwrap();
+        let bo = data_file.insert(&b).unwrap();
+        let co = data_file.insert(&c).unwrap();
 
         assert_eq!(data_file.read_to_vec(ao, a.len()).unwrap(), a);
         assert_eq!(data_file.read_to_array::<4>(bo).unwrap(), b);
@@ -178,11 +156,11 @@ mod tests {
     #[test]
     fn test_offsets_are_sequential() {
         let tmp = NamedTempFile::new().unwrap();
-        let data_file = DataFile::open(tmp.path()).unwrap();
+        let data_file = DataFileRW::open(tmp.path()).unwrap();
 
-        let o1 = data_file.append(&[0; 10]).unwrap();
-        let o2 = data_file.append(&[0; 5]).unwrap();
-        let o3 = data_file.append(&[0; 3]).unwrap();
+        let o1 = data_file.insert(&[0; 10]).unwrap();
+        let o2 = data_file.insert(&[0; 5]).unwrap();
+        let o3 = data_file.insert(&[0; 3]).unwrap();
 
         assert_eq!(o1, 0);
         assert_eq!(o2, 10);
@@ -192,11 +170,11 @@ mod tests {
     #[test]
     fn test_concurrent_reads_during_writes() {
         let tmp = NamedTempFile::new().unwrap();
-        let data_file = DataFile::open(tmp.path()).unwrap();
+        let data_file = DataFileRW::open(tmp.path()).unwrap();
 
         // Pre-populate with known data.
         let data: Vec<u8> = (0..=255).collect();
-        let offset = data_file.append(&data).unwrap();
+        let offset = data_file.insert(&data).unwrap();
 
         let data_file = std::sync::Arc::new(data_file);
         let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
@@ -208,7 +186,7 @@ mod tests {
             std::thread::spawn(move || {
                 barrier.wait();
                 for i in 0u8..=255 {
-                    data_file.append(&[i; 128]).unwrap();
+                    data_file.insert(&[i; 128]).unwrap();
                 }
             })
         };
@@ -240,12 +218,12 @@ mod tests {
         let tmp = NamedTempFile::new().unwrap();
 
         let o1 = {
-            let data_file = DataFile::open(tmp.path()).unwrap();
-            data_file.append(&[1, 2, 3]).unwrap()
+            let data_file = DataFileRW::open(tmp.path()).unwrap();
+            data_file.insert(&[1, 2, 3]).unwrap()
         };
 
-        let data_file = DataFile::open(tmp.path()).unwrap();
-        let o2 = data_file.append(&[4, 5]).unwrap();
+        let data_file = DataFileRW::open(tmp.path()).unwrap();
+        let o2 = data_file.insert(&[4, 5]).unwrap();
 
         assert_eq!(o2, 3);
         assert_eq!(data_file.read_to_array::<3>(o1).unwrap(), [1, 2, 3]);
