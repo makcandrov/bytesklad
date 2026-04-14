@@ -1,4 +1,4 @@
-use preimages_db::{PreimageDb, PreimageDbConfig};
+use preimages_db::{PreimageDbRW, PreimageDbRead, PreimageDbWrite};
 use tempfile::TempDir;
 use tiny_keccak::{Hasher, Keccak};
 
@@ -10,9 +10,9 @@ fn keccak256(data: &[u8]) -> [u8; 32] {
     out
 }
 
-fn open_db(buckets: Vec<usize>) -> (PreimageDb, TempDir) {
+fn open_db(buckets: Vec<usize>) -> (PreimageDbRW, TempDir) {
     let dir = TempDir::new().unwrap();
-    let db = PreimageDb::open(PreimageDbConfig::new(dir.path(), buckets)).unwrap();
+    let db = PreimageDbRW::open(dir.path(), buckets).unwrap();
     (db, dir)
 }
 
@@ -158,12 +158,12 @@ fn reopen_preserves_data() {
     let hvar = keccak256(dvar);
 
     {
-        let db = PreimageDb::open(PreimageDbConfig::new(dir.path(), buckets.clone())).unwrap();
+        let db = PreimageDbRW::open(dir.path(), buckets.clone()).unwrap();
         db.insert(&h4, &d4).unwrap();
         db.insert(&hvar, dvar).unwrap();
     }
 
-    let db = PreimageDb::open(PreimageDbConfig::new(dir.path(), buckets)).unwrap();
+    let db = PreimageDbRW::open(dir.path(), buckets).unwrap();
     assert_eq!(db.len().unwrap(), 2);
     assert_eq!(db.get(&h4).unwrap().unwrap(), d4);
     assert_eq!(db.get(&hvar).unwrap().unwrap(), dvar);

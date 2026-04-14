@@ -8,7 +8,7 @@ mod lock;
 use lock::LockFile;
 
 mod store;
-pub use store::{Error, FlatStoreRW, FlatStoreReader};
+pub use store::{Error, FlatStoreRO, FlatStoreRW};
 
 mod traits;
 pub use traits::{FlatStoreRead, FlatStoreWrite};

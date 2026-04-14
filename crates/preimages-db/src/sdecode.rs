@@ -1,11 +1,10 @@
-use flat_store::{FlatStoreRW, FlatStoreRead};
 use sdecode_preimages_interface::{
     Image, Preimage, PreimageEntry, PreimageEntryRef, PreimagesProvider, PreimagesWriter,
 };
 
-use crate::{Error, PreimageDb};
+use crate::{Error, PreimageDbRO, PreimageDbRW, PreimageDbRead, PreimageDbWrite};
 
-impl<S: FlatStoreRead> PreimagesProvider for PreimageDb<S> {
+impl PreimagesProvider for PreimageDbRW {
     type Error = Error;
 
     fn nearest_lower_preimage(&self, image: &Image) -> crate::Result<Option<PreimageEntry>> {
@@ -26,11 +25,36 @@ impl<S: FlatStoreRead> PreimagesProvider for PreimageDb<S> {
     }
 
     fn is_empty(&self) -> Result<bool, Self::Error> {
-        self.is_empty()
+        PreimageDbRead::is_empty(self)
     }
 }
 
-impl PreimagesWriter for PreimageDb<FlatStoreRW> {
+impl PreimagesProvider for PreimageDbRO {
+    type Error = Error;
+
+    fn nearest_lower_preimage(&self, image: &Image) -> crate::Result<Option<PreimageEntry>> {
+        let result = self.nearest_lower(image.as_ref())?;
+        Ok(result
+            .map(|(hash, data)| PreimageEntry::new_unchecked(hash.into(), Preimage::from(data))))
+    }
+
+    fn nearest_upper_preimage(&self, image: &Image) -> crate::Result<Option<PreimageEntry>> {
+        let result = self.nearest_upper(image.as_ref())?;
+        Ok(result
+            .map(|(hash, data)| PreimageEntry::new_unchecked(hash.into(), Preimage::from(data))))
+    }
+
+    fn exact_preimage(&self, image: &Image) -> Result<Option<Preimage>, Self::Error> {
+        let data = self.get(image.as_ref())?;
+        Ok(data.map(Preimage::from))
+    }
+
+    fn is_empty(&self) -> Result<bool, Self::Error> {
+        PreimageDbRead::is_empty(self)
+    }
+}
+
+impl PreimagesWriter for PreimageDbRW {
     type Error = Error;
 
     fn write_preimages<'a>(

@@ -3,14 +3,16 @@
 //! Uses [`flat_store`] for bulk byte storage and MDBX for the hash index.
 //! Each MDBX entry is 12 bytes: `[8-byte offset][4-byte len]`.
 
-use std::fs;
-use std::path::PathBuf;
+use std::{fs, path::Path};
 
-pub use flat_store::{FlatStoreRW, FlatStoreRead, FlatStoreReader, FlatStoreWrite};
+use flat_store::{FlatStoreRO, FlatStoreRW, FlatStoreRead, FlatStoreWrite};
 use libmdbx::{
     Database, DatabaseOptions, Mode as MdbxMode, NoWriteMap, ReadWriteOptions, SyncMode,
     TableFlags, WriteFlags,
 };
+
+mod traits;
+pub use traits::{PreimageDbRead, PreimageDbWrite};
 
 #[cfg(feature = "sdecode")]
 mod sdecode;
@@ -27,7 +29,19 @@ const VALUE_LEN: usize = 12;
 /// this limit. Sized to comfortably exceed any expected index footprint.
 const MDBX_MAP_SIZE: isize = 1024 * 1024 * 1024 * 1024;
 
-// ── Error ────────────────────────────────────────────────────────────
+/// Read-only preimage database. Any number of read-only handles may coexist
+/// with a single writer.
+pub struct PreimageDbRO {
+    mdbx: Database<NoWriteMap>,
+    store: FlatStoreRO,
+}
+
+/// Read-write preimage database. Only one writer may hold the database open
+/// at a time.
+pub struct PreimageDbRW {
+    mdbx: Database<NoWriteMap>,
+    store: FlatStoreRW,
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -46,8 +60,6 @@ pub enum Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-// ── Value encoding ──────────────────────────────────────────────────
-
 fn encode_value(offset: u64, len: u32) -> [u8; VALUE_LEN] {
     let mut buf = [0u8; VALUE_LEN];
     buf[..8].copy_from_slice(&offset.to_le_bytes());
@@ -64,41 +76,13 @@ fn decode_value(raw: &[u8]) -> Result<(u64, usize)> {
     Ok((offset, len))
 }
 
-// ── Config ───────────────────────────────────────────────────────────
-
-pub struct PreimageDbConfig {
-    /// Root directory for all data (MDBX files live here, flat files in a
-    /// `data/` subdirectory).
-    pub path: PathBuf,
-    /// Bucket sizes for the flat store. Preimages whose length matches a
-    /// bucket go into a dedicated file; all others go into the unsized file.
-    pub buckets: Vec<usize>,
-}
-
-impl PreimageDbConfig {
-    pub fn new(path: impl Into<PathBuf>, buckets: Vec<usize>) -> Self {
-        Self {
-            path: path.into(),
-            buckets,
-        }
-    }
-}
-
-// ── PreimageDb ───────────────────────────────────────────────────────
-
-pub struct PreimageDb<S = FlatStoreRW> {
-    mdbx: Database<NoWriteMap>,
-    store: S,
-}
-
-impl PreimageDb<FlatStoreRW> {
-    /// Open the database in read-write mode. Only one writer may hold the
-    /// database open at a time.
-    pub fn open(config: PreimageDbConfig) -> Result<Self> {
-        fs::create_dir_all(&config.path)?;
+impl PreimageDbRW {
+    /// Open the database in read-write mode.
+    pub fn open(path: impl AsRef<Path>, buckets: impl IntoIterator<Item = usize>) -> Result<Self> {
+        fs::create_dir_all(&path)?;
 
         let mdbx = Database::<NoWriteMap>::open_with_options(
-            &config.path,
+            &path,
             DatabaseOptions {
                 mode: MdbxMode::ReadWrite(ReadWriteOptions {
                     sync_mode: SyncMode::SafeNoSync,
@@ -116,13 +100,54 @@ impl PreimageDb<FlatStoreRW> {
             tx.commit()?;
         }
 
-        let store = FlatStoreRW::open(config.path.join("data"), config.buckets)?;
+        let store = FlatStoreRW::open(path.as_ref().join("data"), buckets)?;
 
         Ok(Self { mdbx, store })
     }
+}
 
-    /// Insert a single preimage. Returns `true` if newly inserted.
-    pub fn insert(&self, hash: &[u8; 32], data: &[u8]) -> Result<bool> {
+impl PreimageDbRO {
+    /// Open the database in read-only mode.
+    pub fn open(path: impl AsRef<Path>, buckets: impl IntoIterator<Item = usize>) -> Result<Self> {
+        let mdbx = Database::<NoWriteMap>::open_with_options(
+            &path,
+            DatabaseOptions {
+                mode: MdbxMode::ReadOnly,
+                max_tables: Some(1),
+                ..Default::default()
+            },
+        )?;
+
+        let store = FlatStoreRO::open(path.as_ref().join("data"), buckets)?;
+
+        Ok(Self { mdbx, store })
+    }
+}
+
+impl PreimageDbRead for PreimageDbRW {
+    fn get(&self, hash: &[u8; 32]) -> Result<Option<Vec<u8>>> {
+        db_get(&self.mdbx, &self.store, hash)
+    }
+
+    fn contains(&self, hash: &[u8; 32]) -> Result<bool> {
+        db_contains(&self.mdbx, hash)
+    }
+
+    fn len(&self) -> Result<usize> {
+        db_len(&self.mdbx)
+    }
+
+    fn nearest_lower(&self, hash: &[u8; 32]) -> Result<Option<([u8; 32], Vec<u8>)>> {
+        db_nearest_lower(&self.mdbx, &self.store, hash)
+    }
+
+    fn nearest_upper(&self, hash: &[u8; 32]) -> Result<Option<([u8; 32], Vec<u8>)>> {
+        db_nearest_upper(&self.mdbx, &self.store, hash)
+    }
+}
+
+impl PreimageDbWrite for PreimageDbRW {
+    fn insert(&self, hash: &[u8; 32], data: &[u8]) -> Result<bool> {
         if self.contains(hash)? {
             return Ok(false);
         }
@@ -145,8 +170,7 @@ impl PreimageDb<FlatStoreRW> {
         Ok(true)
     }
 
-    /// Insert a batch of preimages. Returns the number of new entries.
-    pub fn insert_batch<'a>(
+    fn insert_batch<'a>(
         &self,
         entries: impl IntoIterator<Item = (&'a [u8; 32], &'a [u8])>,
     ) -> Result<usize> {
@@ -190,96 +214,98 @@ impl PreimageDb<FlatStoreRW> {
     }
 }
 
-impl PreimageDb<FlatStoreReader> {
-    /// Open the database in read-only mode. Any number of read-only handles
-    /// may coexist with a single writer.
-    pub fn open_read_only(config: PreimageDbConfig) -> Result<Self> {
-        let mdbx = Database::<NoWriteMap>::open_with_options(
-            &config.path,
-            DatabaseOptions {
-                mode: MdbxMode::ReadOnly,
-                max_tables: Some(1),
-                ..Default::default()
-            },
-        )?;
+impl PreimageDbRead for PreimageDbRO {
+    fn get(&self, hash: &[u8; 32]) -> Result<Option<Vec<u8>>> {
+        db_get(&self.mdbx, &self.store, hash)
+    }
 
-        let store = FlatStoreReader::open(config.path.join("data"), config.buckets)?;
+    fn contains(&self, hash: &[u8; 32]) -> Result<bool> {
+        db_contains(&self.mdbx, hash)
+    }
 
-        Ok(Self { mdbx, store })
+    fn len(&self) -> Result<usize> {
+        db_len(&self.mdbx)
+    }
+
+    fn nearest_lower(&self, hash: &[u8; 32]) -> Result<Option<([u8; 32], Vec<u8>)>> {
+        db_nearest_lower(&self.mdbx, &self.store, hash)
+    }
+
+    fn nearest_upper(&self, hash: &[u8; 32]) -> Result<Option<([u8; 32], Vec<u8>)>> {
+        db_nearest_upper(&self.mdbx, &self.store, hash)
     }
 }
 
-impl<S: FlatStoreRead> PreimageDb<S> {
-    /// Look up a preimage by its keccak256 hash.
-    pub fn get(&self, hash: &[u8; 32]) -> Result<Option<Vec<u8>>> {
-        let tx = self.mdbx.begin_ro_txn()?;
-        let table = tx.open_table(Some(MDBX_TABLE))?;
-        let raw: Option<Vec<u8>> = tx.get(&table, hash.as_slice())?;
+fn db_get(
+    mdbx: &Database<NoWriteMap>,
+    store: &impl FlatStoreRead,
+    hash: &[u8; 32],
+) -> Result<Option<Vec<u8>>> {
+    let tx = mdbx.begin_ro_txn()?;
+    let table = tx.open_table(Some(MDBX_TABLE))?;
+    let raw: Option<Vec<u8>> = tx.get(&table, hash.as_slice())?;
 
-        let Some(raw) = raw else {
-            return Ok(None);
-        };
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
 
-        let (offset, len) = decode_value(&raw)?;
-        let data = self.store.read_to_vec(offset, len)?;
-        Ok(Some(data))
-    }
+    let (offset, len) = decode_value(&raw)?;
+    let data = store.read_to_vec(offset, len)?;
+    Ok(Some(data))
+}
 
-    /// Check if a hash exists in the index.
-    pub fn contains(&self, hash: &[u8; 32]) -> Result<bool> {
-        let tx = self.mdbx.begin_ro_txn()?;
-        let table = tx.open_table(Some(MDBX_TABLE))?;
-        Ok(tx.get::<Vec<u8>>(&table, hash.as_slice())?.is_some())
-    }
+fn db_contains(mdbx: &Database<NoWriteMap>, hash: &[u8; 32]) -> Result<bool> {
+    let tx = mdbx.begin_ro_txn()?;
+    let table = tx.open_table(Some(MDBX_TABLE))?;
+    Ok(tx.get::<Vec<u8>>(&table, hash.as_slice())?.is_some())
+}
 
-    /// Total number of preimages stored.
-    pub fn len(&self) -> Result<usize> {
-        let tx = self.mdbx.begin_ro_txn()?;
-        let table = tx.open_table(Some(MDBX_TABLE))?;
-        Ok(tx.table_stat(&table)?.entries())
-    }
+fn db_len(mdbx: &Database<NoWriteMap>) -> Result<usize> {
+    let tx = mdbx.begin_ro_txn()?;
+    let table = tx.open_table(Some(MDBX_TABLE))?;
+    Ok(tx.table_stat(&table)?.entries())
+}
 
-    pub fn is_empty(&self) -> Result<bool> {
-        Ok(self.len()? == 0)
-    }
+fn db_nearest_lower(
+    mdbx: &Database<NoWriteMap>,
+    store: &impl FlatStoreRead,
+    hash: &[u8; 32],
+) -> Result<Option<([u8; 32], Vec<u8>)>> {
+    let tx = mdbx.begin_ro_txn()?;
+    let table = tx.open_table(Some(MDBX_TABLE))?;
+    let mut cursor = tx.cursor(&table)?;
 
-    /// Returns the entry with the largest hash less than or equal to `hash`,
-    /// or `None` if no such entry exists.
-    pub fn nearest_lower(&self, hash: &[u8; 32]) -> Result<Option<([u8; 32], Vec<u8>)>> {
-        let tx = self.mdbx.begin_ro_txn()?;
-        let table = tx.open_table(Some(MDBX_TABLE))?;
-        let mut cursor = tx.cursor(&table)?;
+    let result = match cursor.set_range::<Vec<u8>, Vec<u8>>(hash.as_slice())? {
+        Some((key, value)) if key.as_slice() == hash.as_slice() => Some((key, value)),
+        _ => cursor.prev::<Vec<u8>, Vec<u8>>()?,
+    };
 
-        let result = match cursor.set_range::<Vec<u8>, Vec<u8>>(hash.as_slice())? {
-            Some((key, value)) if key.as_slice() == hash.as_slice() => Some((key, value)),
-            _ => cursor.prev::<Vec<u8>, Vec<u8>>()?,
-        };
+    read_cursor_result(store, result)
+}
 
-        self.read_cursor_result(result)
-    }
+fn db_nearest_upper(
+    mdbx: &Database<NoWriteMap>,
+    store: &impl FlatStoreRead,
+    hash: &[u8; 32],
+) -> Result<Option<([u8; 32], Vec<u8>)>> {
+    let tx = mdbx.begin_ro_txn()?;
+    let table = tx.open_table(Some(MDBX_TABLE))?;
+    let mut cursor = tx.cursor(&table)?;
 
-    /// Returns the entry with the smallest hash greater than or equal to `hash`,
-    /// or `None` if no such entry exists.
-    pub fn nearest_upper(&self, hash: &[u8; 32]) -> Result<Option<([u8; 32], Vec<u8>)>> {
-        let tx = self.mdbx.begin_ro_txn()?;
-        let table = tx.open_table(Some(MDBX_TABLE))?;
-        let mut cursor = tx.cursor(&table)?;
+    let result = cursor.set_range::<Vec<u8>, Vec<u8>>(hash.as_slice())?;
 
-        let result = cursor.set_range::<Vec<u8>, Vec<u8>>(hash.as_slice())?;
+    read_cursor_result(store, result)
+}
 
-        self.read_cursor_result(result)
-    }
-
-    fn read_cursor_result(
-        &self,
-        result: Option<(Vec<u8>, Vec<u8>)>,
-    ) -> Result<Option<([u8; 32], Vec<u8>)>> {
-        let Some((key, value)) = result else {
-            return Ok(None);
-        };
-        let hash: [u8; 32] = key.try_into().map_err(|_| Error::CorruptIndex)?;
-        let (offset, len) = decode_value(&value)?;
-        let data = self.store.read_to_vec(offset, len)?;
-        Ok(Some((hash, data)))
-    }
+fn read_cursor_result(
+    store: &impl FlatStoreRead,
+    result: Option<(Vec<u8>, Vec<u8>)>,
+) -> Result<Option<([u8; 32], Vec<u8>)>> {
+    let Some((key, value)) = result else {
+        return Ok(None);
+    };
+    let hash: [u8; 32] = key.try_into().map_err(|_| Error::CorruptIndex)?;
+    let (offset, len) = decode_value(&value)?;
+    let data = store.read_to_vec(offset, len)?;
+    Ok(Some((hash, data)))
 }

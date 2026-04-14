@@ -24,7 +24,7 @@ pub struct FlatStoreRW {
 
 /// Read-only flat store. Any number of read-only handles may coexist with a
 /// single writer — no lock is taken and no recovery is run.
-pub struct FlatStoreReader {
+pub struct FlatStoreRO {
     sized_files: HashMap<usize, DataFileRO>,
     unsized_file: DataFileRO,
 }
@@ -65,7 +65,7 @@ impl FlatStoreRW {
     }
 }
 
-impl FlatStoreReader {
+impl FlatStoreRO {
     pub fn open(
         path: impl AsRef<Path>,
         buckets: impl IntoIterator<Item = usize>,
@@ -119,7 +119,7 @@ impl FlatStoreWrite for FlatStoreRW {
     }
 }
 
-impl FlatStoreRead for FlatStoreReader {
+impl FlatStoreRead for FlatStoreRO {
     fn read(&self, buf: &mut [u8], offset: u64) -> Result<(), io::Error> {
         self.file(buf.len()).read(buf, offset)
     }

@@ -2,9 +2,7 @@
 name = "preimages-db"
 version.workspace = true
 edition.workspace = true
-
-[features]
-sdecode = ["dep:sdecode-preimages-interface"]
+rust-version.workspace = true
 
 [dependencies]
 flat-store.workspace = true
@@ -15,3 +13,6 @@ sdecode-preimages-interface = { workspace = true, optional = true }
 [dev-dependencies]
 tempfile.workspace = true
 tiny-keccak.workspace = true
+
+[features]
+sdecode = ["dep:sdecode-preimages-interface"]
