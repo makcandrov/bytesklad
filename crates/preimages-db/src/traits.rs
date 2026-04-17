@@ -27,9 +27,18 @@ pub trait PreimageDbRead {
 /// Read-write access to a preimage database.
 pub trait PreimageDbWrite: PreimageDbRead {
     /// Insert a single preimage. Returns `true` if newly inserted.
+    ///
+    /// Each call fsyncs both the data file and the MDBX index so the entry is
+    /// durable on return. For many inserts, prefer [`insert_batch`] — it
+    /// performs a single fsync for the whole batch.
+    ///
+    /// [`insert_batch`]: PreimageDbWrite::insert_batch
     fn insert(&self, hash: &[u8; 32], data: &[u8]) -> Result<bool>;
 
     /// Insert a batch of preimages. Returns the number of new entries.
+    ///
+    /// The whole batch is made durable with a single fsync per store, so this
+    /// is the preferred path for bulk ingest.
     fn insert_batch<'a>(
         &self,
         entries: impl IntoIterator<Item = (&'a [u8; 32], &'a [u8])>,
