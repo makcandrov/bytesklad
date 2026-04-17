@@ -36,11 +36,27 @@ pub struct PreimageDbRO {
     store: FlatStoreRO,
 }
 
+impl std::fmt::Debug for PreimageDbRO {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PreimageDbRO")
+            .field("store", &self.store)
+            .finish_non_exhaustive()
+    }
+}
+
 /// Read-write preimage database. Only one writer may hold the database open
 /// at a time.
 pub struct PreimageDbRW {
     mdbx: Database<NoWriteMap>,
     store: FlatStoreRW,
+}
+
+impl std::fmt::Debug for PreimageDbRW {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PreimageDbRW")
+            .field("store", &self.store)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug, thiserror::Error)]

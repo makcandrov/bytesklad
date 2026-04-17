@@ -8,20 +8,24 @@ use parking_lot::Mutex;
 
 use crate::{FlatStoreRead, FlatStoreWrite};
 
+#[derive(Debug)]
 pub(crate) struct DataFileRW {
     writer: Mutex<Writer>,
     reader: Reader,
 }
 
+#[derive(Debug)]
 pub(crate) struct DataFileRO {
     reader: Reader,
 }
 
+#[derive(Debug)]
 struct Writer {
     file: File,
     offset: u64,
 }
 
+#[derive(Debug)]
 struct Reader {
     file: File,
 }

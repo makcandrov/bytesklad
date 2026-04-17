@@ -15,6 +15,7 @@ pub enum Error {
 
 /// Read-write flat store. Only one writer may hold the store open at a time;
 /// the lock is enforced via a lock file in the store directory.
+#[derive(Debug)]
 pub struct FlatStoreRW {
     sized_files: HashMap<usize, DataFileRW>,
     unsized_file: DataFileRW,
@@ -24,6 +25,7 @@ pub struct FlatStoreRW {
 
 /// Read-only flat store. Any number of read-only handles may coexist with a
 /// single writer — no lock is taken and no recovery is run.
+#[derive(Debug)]
 pub struct FlatStoreRO {
     sized_files: HashMap<usize, DataFileRO>,
     unsized_file: DataFileRO,

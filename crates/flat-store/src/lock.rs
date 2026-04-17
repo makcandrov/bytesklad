@@ -39,6 +39,7 @@ fn try_lock_exclusive(file: &File) -> Result<(), io::Error> {
     Ok(())
 }
 
+#[derive(Debug)]
 pub(crate) struct LockFile(#[allow(unused)] File);
 
 impl LockFile {

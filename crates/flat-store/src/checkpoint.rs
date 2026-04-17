@@ -12,6 +12,7 @@ use crate::DataFileRW;
 /// u64::MAX as bucket means the unsized file.
 const ENTRY_SIZE: usize = 16;
 
+#[derive(Debug)]
 pub(crate) struct Checkpoint {
     path: PathBuf,
 }
