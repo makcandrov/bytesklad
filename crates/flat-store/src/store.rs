@@ -1,6 +1,7 @@
 use std::{fs, io, path::Path};
 
 use hashbrown::HashMap;
+use parking_lot::Mutex;
 
 use crate::{Checkpoint, DataFileRO, DataFileRW, FlatStoreRead, FlatStoreWrite, LockFile};
 
@@ -16,13 +17,18 @@ pub enum Error {
     Empty,
 }
 
-/// Read-write flat store. Only one writer may hold the store open at a time;
-/// the lock is enforced via a lock file in the store directory.
+/// Read-write flat store. Only one writer process may hold the store open at a
+/// time (enforced via a lock file in the store directory). Within that
+/// process, the store is `Send + Sync`: `insert` may be called from multiple
+/// threads and serialization of `sync` is handled internally.
 #[derive(Debug)]
 pub struct FlatStoreRW {
     sized_files: HashMap<usize, DataFileRW>,
     unsized_file: DataFileRW,
     checkpoint: Checkpoint,
+    /// Held for the whole of `sync()` so concurrent callers don't race on the
+    /// `checkpoint.tmp` rename and so checkpoint offsets advance monotonically.
+    sync_lock: Mutex<()>,
     _lock_file: LockFile,
 }
 
@@ -61,6 +67,7 @@ impl FlatStoreRW {
             sized_files,
             unsized_file,
             checkpoint,
+            sync_lock: Mutex::new(()),
             _lock_file: lock_file,
         })
     }
@@ -132,6 +139,7 @@ impl FlatStoreWrite for FlatStoreRW {
     }
 
     fn sync(&self) -> Result<(), io::Error> {
+        let _sync_guard = self.sync_lock.lock();
         for file in self.sized_files.values() {
             file.sync()?;
         }

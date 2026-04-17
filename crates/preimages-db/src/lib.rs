@@ -37,6 +37,17 @@ const _: () = assert!(
     "preimages-db requires a 64-bit target"
 );
 
+// Guarantee the RW handle can be shared across threads via `Arc`: multi-threaded
+// writers are a supported use case.
+const _: fn() = || {
+    fn assert_send<T: Send>() {}
+    fn assert_sync<T: Sync>() {}
+    assert_send::<PreimageDbRW>();
+    assert_sync::<PreimageDbRW>();
+    assert_send::<PreimageDbRO>();
+    assert_sync::<PreimageDbRO>();
+};
+
 /// Read-only preimage database. Any number of read-only handles may coexist
 /// with a single writer.
 pub struct PreimageDbRO {

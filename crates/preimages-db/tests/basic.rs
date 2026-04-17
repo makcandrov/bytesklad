@@ -223,6 +223,44 @@ fn ro_discovers_buckets_from_disk() {
 }
 
 #[test]
+fn concurrent_inserts_from_multiple_threads() {
+    use std::sync::Arc;
+
+    let dir = TempDir::new().unwrap();
+    let db = Arc::new(PreimageDbRW::open(dir.path(), vec![32]).unwrap());
+
+    const THREADS: u32 = 8;
+    const PER_THREAD: u32 = 50;
+
+    let handles: Vec<_> = (0..THREADS)
+        .map(|t| {
+            let db = db.clone();
+            std::thread::spawn(move || {
+                for i in 0..PER_THREAD {
+                    let data = (t * PER_THREAD + i).to_le_bytes().to_vec();
+                    let hash = keccak256(&data);
+                    db.insert(&hash, &data).unwrap();
+                }
+            })
+        })
+        .collect();
+
+    for h in handles {
+        h.join().unwrap();
+    }
+
+    assert_eq!(db.len().unwrap(), (THREADS * PER_THREAD) as usize);
+
+    for t in 0..THREADS {
+        for i in 0..PER_THREAD {
+            let data = (t * PER_THREAD + i).to_le_bytes().to_vec();
+            let hash = keccak256(&data);
+            assert_eq!(db.get(&hash).unwrap().unwrap(), data);
+        }
+    }
+}
+
+#[test]
 fn various_sizes() {
     let (db, _dir) = open_db(vec![]);
 
