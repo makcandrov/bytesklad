@@ -11,6 +11,9 @@ pub enum Error {
 
     #[error("store is already locked by another process")]
     Locked,
+
+    #[error("store does not exist or has not been initialized")]
+    Empty,
 }
 
 /// Read-write flat store. Only one writer may hold the store open at a time;
@@ -68,25 +71,43 @@ impl FlatStoreRW {
 }
 
 impl FlatStoreRO {
-    pub fn open(
-        path: impl AsRef<Path>,
-        buckets: impl IntoIterator<Item = usize>,
-    ) -> Result<Self, Error> {
+    /// Open the store read-only. Buckets are discovered by enumerating
+    /// `size_{N}` files in `path`, so the reader always matches the writer's
+    /// actual on-disk layout rather than a user-supplied (and possibly stale)
+    /// bucket list.
+    ///
+    /// Returns [`Error::Empty`] if the store directory doesn't exist or hasn't
+    /// been initialized by a writer yet (i.e. the `unsized` data file is
+    /// absent). The writer creates that file unconditionally on first open.
+    pub fn open(path: impl AsRef<Path>) -> Result<Self, Error> {
         let path = path.as_ref();
 
+        let entries = match fs::read_dir(path) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Err(Error::Empty),
+            Err(e) => return Err(e.into()),
+        };
+
         let mut sized_files = HashMap::new();
-        for bucket in buckets {
-            let file_path = path.join(format!("size_{bucket}"));
-            match DataFileRO::open(&file_path) {
-                Ok(file) => {
-                    sized_files.insert(bucket, file);
-                }
-                Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
-                Err(e) => return Err(e.into()),
-            }
+        for entry in entries {
+            let entry = entry?;
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else { continue };
+            let Some(rest) = name.strip_prefix("size_") else {
+                continue;
+            };
+            let Ok(bucket) = rest.parse::<usize>() else {
+                continue;
+            };
+            let file = DataFileRO::open(entry.path())?;
+            sized_files.insert(bucket, file);
         }
 
-        let unsized_file = DataFileRO::open(path.join("unsized"))?;
+        let unsized_file = match DataFileRO::open(path.join("unsized")) {
+            Ok(f) => f,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Err(Error::Empty),
+            Err(e) => return Err(e.into()),
+        };
 
         Ok(Self {
             sized_files,

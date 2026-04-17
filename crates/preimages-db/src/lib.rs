@@ -131,8 +131,9 @@ impl PreimageDbRW {
 }
 
 impl PreimageDbRO {
-    /// Open the database in read-only mode.
-    pub fn open(path: impl AsRef<Path>, buckets: impl IntoIterator<Item = usize>) -> Result<Self> {
+    /// Open the database in read-only mode. Bucket layout is discovered from
+    /// disk, so the caller doesn't need to know what buckets the writer used.
+    pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let mdbx = Database::<NoWriteMap>::open_with_options(
             &path,
             DatabaseOptions {
@@ -142,7 +143,7 @@ impl PreimageDbRO {
             },
         )?;
 
-        let store = FlatStoreRO::open(path.as_ref().join("data"), buckets)?;
+        let store = FlatStoreRO::open(path.as_ref().join("data"))?;
 
         Ok(Self { mdbx, store })
     }

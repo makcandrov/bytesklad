@@ -1,4 +1,4 @@
-use preimages_db::{PreimageDbRW, PreimageDbRead, PreimageDbWrite};
+use preimages_db::{PreimageDbRO, PreimageDbRW, PreimageDbRead, PreimageDbWrite};
 use tempfile::TempDir;
 use tiny_keccak::{Hasher, Keccak};
 
@@ -192,6 +192,34 @@ fn reopen_preserves_data() {
     assert_eq!(db.len().unwrap(), 2);
     assert_eq!(db.get(&h4).unwrap().unwrap(), d4);
     assert_eq!(db.get(&hvar).unwrap().unwrap(), dvar);
+}
+
+#[test]
+fn ro_discovers_buckets_from_disk() {
+    let dir = TempDir::new().unwrap();
+
+    let d4 = [0xAAu8; 4];
+    let d32 = [0xBBu8; 32];
+    let dvar = b"variable length preimage data here";
+
+    let h4 = keccak256(&d4);
+    let h32 = keccak256(&d32);
+    let hvar = keccak256(dvar);
+
+    {
+        let db = PreimageDbRW::open(dir.path(), [4, 32]).unwrap();
+        db.insert(&h4, &d4).unwrap();
+        db.insert(&h32, &d32).unwrap();
+        db.insert(&hvar, dvar).unwrap();
+    }
+
+    // RO does not take a bucket list; it must route reads to the right files
+    // regardless, by discovering the layout on disk.
+    let ro = PreimageDbRO::open(dir.path()).unwrap();
+    assert_eq!(ro.len().unwrap(), 3);
+    assert_eq!(ro.get(&h4).unwrap().unwrap(), d4);
+    assert_eq!(ro.get(&h32).unwrap().unwrap(), d32);
+    assert_eq!(ro.get(&hvar).unwrap().unwrap(), dvar);
 }
 
 #[test]

@@ -1,6 +1,6 @@
 use std::{fs, path::PathBuf};
 
-use flat_store::{FlatStoreRW, FlatStoreRead, FlatStoreWrite};
+use flat_store::{Error, FlatStoreRO, FlatStoreRW, FlatStoreRead, FlatStoreWrite};
 
 fn tmp_dir(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("flat_store_test_{name}_{}", std::process::id()));
@@ -17,6 +17,21 @@ fn single_file_roundtrip() {
     let r = store.insert(data).unwrap();
     assert_eq!(store.read_to_vec(r, data.len()).unwrap(), data);
 
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn ro_on_missing_dir_returns_empty() {
+    let dir = tmp_dir("ro_missing");
+    // Directory does not exist at all.
+    assert!(matches!(FlatStoreRO::open(&dir), Err(Error::Empty)));
+}
+
+#[test]
+fn ro_on_uninitialized_dir_returns_empty() {
+    let dir = tmp_dir("ro_uninit");
+    fs::create_dir_all(&dir).unwrap();
+    assert!(matches!(FlatStoreRO::open(&dir), Err(Error::Empty)));
     let _ = fs::remove_dir_all(&dir);
 }
 
