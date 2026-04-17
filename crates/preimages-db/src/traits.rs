@@ -1,7 +1,7 @@
 use crate::Result;
 
 /// Read-only access to a preimage database.
-pub trait PreimageDbRead {
+pub trait PreimagesDbRead {
     /// Look up a preimage by its keccak256 hash.
     fn get(&self, hash: &[u8; 32]) -> Result<Option<Vec<u8>>>;
 
@@ -25,14 +25,14 @@ pub trait PreimageDbRead {
 }
 
 /// Read-write access to a preimage database.
-pub trait PreimageDbWrite: PreimageDbRead {
+pub trait PreimagesDbWrite: PreimagesDbRead {
     /// Insert a single preimage. Returns `true` if newly inserted.
     ///
     /// Each call fsyncs both the data file and the MDBX index so the entry is
     /// durable on return. For many inserts, prefer [`insert_batch`] — it
     /// performs a single fsync for the whole batch.
     ///
-    /// [`insert_batch`]: PreimageDbWrite::insert_batch
+    /// [`insert_batch`]: PreimagesDbWrite::insert_batch
     fn insert(&self, hash: &[u8; 32], data: &[u8]) -> Result<bool>;
 
     /// Insert a batch of preimages. Returns the number of new entries.

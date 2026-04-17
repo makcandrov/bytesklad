@@ -1,4 +1,4 @@
-use preimages_db::{PreimageDbRO, PreimageDbRW, PreimageDbRead, PreimageDbWrite};
+use preimages_db::{PreimagesDbRO, PreimagesDbRW, PreimagesDbRead, PreimagesDbWrite};
 use tempfile::TempDir;
 use tiny_keccak::{Hasher, Keccak};
 
@@ -10,9 +10,9 @@ fn keccak256(data: &[u8]) -> [u8; 32] {
     out
 }
 
-fn open_db(buckets: Vec<usize>) -> (PreimageDbRW, TempDir) {
+fn open_db(buckets: Vec<usize>) -> (PreimagesDbRW, TempDir) {
     let dir = TempDir::new().unwrap();
-    let db = PreimageDbRW::open(dir.path(), buckets).unwrap();
+    let db = PreimagesDbRW::open(dir.path(), buckets).unwrap();
     (db, dir)
 }
 
@@ -183,12 +183,12 @@ fn reopen_preserves_data() {
     let hvar = keccak256(dvar);
 
     {
-        let db = PreimageDbRW::open(dir.path(), buckets.clone()).unwrap();
+        let db = PreimagesDbRW::open(dir.path(), buckets.clone()).unwrap();
         db.insert(&h4, &d4).unwrap();
         db.insert(&hvar, dvar).unwrap();
     }
 
-    let db = PreimageDbRW::open(dir.path(), buckets).unwrap();
+    let db = PreimagesDbRW::open(dir.path(), buckets).unwrap();
     assert_eq!(db.len().unwrap(), 2);
     assert_eq!(db.get(&h4).unwrap().unwrap(), d4);
     assert_eq!(db.get(&hvar).unwrap().unwrap(), dvar);
@@ -207,7 +207,7 @@ fn ro_discovers_buckets_from_disk() {
     let hvar = keccak256(dvar);
 
     {
-        let db = PreimageDbRW::open(dir.path(), [4, 32]).unwrap();
+        let db = PreimagesDbRW::open(dir.path(), [4, 32]).unwrap();
         db.insert(&h4, &d4).unwrap();
         db.insert(&h32, &d32).unwrap();
         db.insert(&hvar, dvar).unwrap();
@@ -215,7 +215,7 @@ fn ro_discovers_buckets_from_disk() {
 
     // RO does not take a bucket list; it must route reads to the right files
     // regardless, by discovering the layout on disk.
-    let ro = PreimageDbRO::open(dir.path()).unwrap();
+    let ro = PreimagesDbRO::open(dir.path()).unwrap();
     assert_eq!(ro.len().unwrap(), 3);
     assert_eq!(ro.get(&h4).unwrap().unwrap(), d4);
     assert_eq!(ro.get(&h32).unwrap().unwrap(), d32);
@@ -227,7 +227,7 @@ fn concurrent_inserts_from_multiple_threads() {
     use std::sync::Arc;
 
     let dir = TempDir::new().unwrap();
-    let db = Arc::new(PreimageDbRW::open(dir.path(), vec![32]).unwrap());
+    let db = Arc::new(PreimagesDbRW::open(dir.path(), vec![32]).unwrap());
 
     const THREADS: u32 = 8;
     const PER_THREAD: u32 = 50;

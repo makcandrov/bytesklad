@@ -14,7 +14,7 @@ those two concerns across two storage layers:
   bucketed by size: fixed-size entries go into per-size files (`size_{N}`),
   variable-length entries fall through to a single `unsized` file.
 
-```
+```txt
                   ┌────────────────────────┐
   hash (32 B) ──► │ MDBX: hash → off, len  │
                   └────────────┬───────────┘
@@ -31,7 +31,7 @@ those two concerns across two storage layers:
 
 On-disk layout:
 
-```
+```txt
 <db-path>/
 ├── mdbx.dat, mdbx.lck     # MDBX index
 └── data/
@@ -53,14 +53,16 @@ handles may coexist with it.
 
 ## Usage
 
-```rust
-use preimages_db::{PreimageDbRW, PreimageDbRead, PreimageDbWrite};
+```rust,no_run
+use preimages_db::{PreimagesDbRW, PreimagesDbRead, PreimagesDbWrite};
 
 // Declare fixed-size buckets up front; everything else spills to `unsized`.
-let db = PreimageDbRW::open("./preimages", [32, 64])?;
+let db = PreimagesDbRW::open("./preimages", [32, 64]).unwrap();
 
-db.insert(&hash, &data)?;
-let data = db.get(&hash)?;
+let hash = [0u8; 32];
+let data = &[0u8; 32];
+db.insert(&hash, data).unwrap();
+let _data = db.get(&hash).unwrap();
 ```
 
 Use `insert_batch` for bulk ingest — it performs a single fsync per store for

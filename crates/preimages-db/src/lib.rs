@@ -1,3 +1,6 @@
+#![cfg_attr(not(test), warn(unused_crate_dependencies))]
+#![doc = include_str!("../../../README.md")]
+
 //! Preimage database: `keccak256(data) → data`.
 //!
 //! Uses [`flat_store`] for bulk byte storage and MDBX for the hash index.
@@ -12,7 +15,7 @@ use libmdbx::{
 };
 
 mod traits;
-pub use traits::{PreimageDbRead, PreimageDbWrite};
+pub use traits::{PreimagesDbRead, PreimagesDbWrite};
 
 #[cfg(feature = "sdecode")]
 mod sdecode;
@@ -32,32 +35,29 @@ const MDBX_MAP_SIZE: isize = 1024 * 1024 * 1024 * 1024;
 // The map size above doesn't fit in `isize` on 32-bit targets, and MDBX itself
 // is impractical with a 2 GB address space anyway. Fail loudly at compile time
 // rather than silently overflowing or crashing at runtime.
-const _: () = assert!(
-    usize::BITS >= 64,
-    "preimages-db requires a 64-bit target"
-);
+const _: () = assert!(usize::BITS >= 64, "preimages-db requires a 64-bit target");
 
 // Guarantee the RW handle can be shared across threads via `Arc`: multi-threaded
 // writers are a supported use case.
 const _: fn() = || {
     fn assert_send<T: Send>() {}
     fn assert_sync<T: Sync>() {}
-    assert_send::<PreimageDbRW>();
-    assert_sync::<PreimageDbRW>();
-    assert_send::<PreimageDbRO>();
-    assert_sync::<PreimageDbRO>();
+    assert_send::<PreimagesDbRW>();
+    assert_sync::<PreimagesDbRW>();
+    assert_send::<PreimagesDbRO>();
+    assert_sync::<PreimagesDbRO>();
 };
 
 /// Read-only preimage database. Any number of read-only handles may coexist
 /// with a single writer.
-pub struct PreimageDbRO {
+pub struct PreimagesDbRO {
     mdbx: Database<NoWriteMap>,
     store: FlatStoreRO,
 }
 
-impl std::fmt::Debug for PreimageDbRO {
+impl std::fmt::Debug for PreimagesDbRO {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("PreimageDbRO")
+        f.debug_struct("PreimagesDbRO")
             .field("store", &self.store)
             .finish_non_exhaustive()
     }
@@ -65,14 +65,14 @@ impl std::fmt::Debug for PreimageDbRO {
 
 /// Read-write preimage database. Only one writer may hold the database open
 /// at a time.
-pub struct PreimageDbRW {
+pub struct PreimagesDbRW {
     mdbx: Database<NoWriteMap>,
     store: FlatStoreRW,
 }
 
-impl std::fmt::Debug for PreimageDbRW {
+impl std::fmt::Debug for PreimagesDbRW {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("PreimageDbRW")
+        f.debug_struct("PreimagesDbRW")
             .field("store", &self.store)
             .finish_non_exhaustive()
     }
@@ -111,7 +111,7 @@ fn decode_value(raw: &[u8]) -> Result<(u64, usize)> {
     Ok((offset, len))
 }
 
-impl PreimageDbRW {
+impl PreimagesDbRW {
     /// Open the database in read-write mode.
     pub fn open(path: impl AsRef<Path>, buckets: impl IntoIterator<Item = usize>) -> Result<Self> {
         fs::create_dir_all(&path)?;
@@ -141,7 +141,7 @@ impl PreimageDbRW {
     }
 }
 
-impl PreimageDbRO {
+impl PreimagesDbRO {
     /// Open the database in read-only mode. Bucket layout is discovered from
     /// disk, so the caller doesn't need to know what buckets the writer used.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
@@ -160,7 +160,7 @@ impl PreimageDbRO {
     }
 }
 
-impl PreimageDbRead for PreimageDbRW {
+impl PreimagesDbRead for PreimagesDbRW {
     fn get(&self, hash: &[u8; 32]) -> Result<Option<Vec<u8>>> {
         db_get(&self.mdbx, &self.store, hash)
     }
@@ -182,7 +182,7 @@ impl PreimageDbRead for PreimageDbRW {
     }
 }
 
-impl PreimageDbWrite for PreimageDbRW {
+impl PreimagesDbWrite for PreimagesDbRW {
     fn insert(&self, hash: &[u8; 32], data: &[u8]) -> Result<bool> {
         if self.contains(hash)? {
             return Ok(false);
@@ -254,7 +254,7 @@ impl PreimageDbWrite for PreimageDbRW {
     }
 }
 
-impl PreimageDbRead for PreimageDbRO {
+impl PreimagesDbRead for PreimagesDbRO {
     fn get(&self, hash: &[u8; 32]) -> Result<Option<Vec<u8>>> {
         db_get(&self.mdbx, &self.store, hash)
     }

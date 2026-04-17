@@ -2,9 +2,9 @@ use sdecode_preimages_interface::{
     Image, Preimage, PreimageEntry, PreimageEntryRef, PreimagesProvider, PreimagesWriter,
 };
 
-use crate::{Error, PreimageDbRO, PreimageDbRW, PreimageDbRead, PreimageDbWrite};
+use crate::{Error, PreimagesDbRO, PreimagesDbRW, PreimagesDbRead, PreimagesDbWrite};
 
-impl PreimagesProvider for PreimageDbRW {
+impl PreimagesProvider for PreimagesDbRW {
     type Error = Error;
 
     fn nearest_lower_preimage(&self, image: &Image) -> crate::Result<Option<PreimageEntry>> {
@@ -25,11 +25,11 @@ impl PreimagesProvider for PreimageDbRW {
     }
 
     fn is_empty(&self) -> Result<bool, Self::Error> {
-        PreimageDbRead::is_empty(self)
+        PreimagesDbRead::is_empty(self)
     }
 }
 
-impl PreimagesProvider for PreimageDbRO {
+impl PreimagesProvider for PreimagesDbRO {
     type Error = Error;
 
     fn nearest_lower_preimage(&self, image: &Image) -> crate::Result<Option<PreimageEntry>> {
@@ -50,11 +50,11 @@ impl PreimagesProvider for PreimageDbRO {
     }
 
     fn is_empty(&self) -> Result<bool, Self::Error> {
-        PreimageDbRead::is_empty(self)
+        PreimagesDbRead::is_empty(self)
     }
 }
 
-impl PreimagesWriter for PreimageDbRW {
+impl PreimagesWriter for PreimagesDbRW {
     type Error = Error;
 
     fn write_preimages<'a>(
