@@ -174,12 +174,15 @@ impl FlatStoreWrite for FlatStoreRW {
 
     fn sync(&self) -> Result<(), io::Error> {
         let _sync_guard = self.sync_lock.lock();
-        for file in self.sized_files.values() {
-            file.sync()?;
+        // Capture each file's end-offset atomically with its fsync. Reading
+        // `offset()` after a separate `sync()` would race with concurrent
+        // inserts and let the checkpoint claim durability for unsynced bytes.
+        let mut sized_offsets: HashMap<usize, u64> = HashMap::with_capacity(self.sized_files.len());
+        for (&bucket, file) in &self.sized_files {
+            sized_offsets.insert(bucket, file.sync_to_offset()?);
         }
-        self.unsized_file.sync()?;
-        self.checkpoint
-            .write(&self.sized_files, &self.unsized_file)?;
+        let unsized_offset = self.unsized_file.sync_to_offset()?;
+        self.checkpoint.write(&sized_offsets, unsized_offset)?;
         Ok(())
     }
 }

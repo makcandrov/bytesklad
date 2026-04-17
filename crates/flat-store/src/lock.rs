@@ -48,7 +48,7 @@ impl LockFile {
             .create(true)
             .truncate(false)
             .write(true)
-            .open(path.as_ref().join("lock"))?;
+            .open(path.as_ref().join("LOCK"))?;
         try_lock_exclusive(&lock_file).map_err(|_| Error::Locked)?;
         Ok(Self(lock_file))
     }

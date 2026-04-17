@@ -72,17 +72,27 @@ impl Checkpoint {
 
     pub fn write(
         &self,
-        sized_files: &HashMap<usize, DataFileRW>,
-        unsized_file: &DataFileRW,
+        sized_offsets: &HashMap<usize, u64>,
+        unsized_offset: u64,
     ) -> Result<(), io::Error> {
-        let mut buf = Vec::with_capacity((sized_files.len() + 1) * ENTRY_SIZE);
-        for (&bucket, file) in sized_files {
+        #[cfg(unix)]
+        pub(crate) fn fsync_dir(path: &std::path::Path) -> std::io::Result<()> {
+            std::fs::File::open(path)?.sync_all()
+        }
+
+        #[cfg(not(unix))]
+        pub(crate) fn fsync_dir(_path: &std::path::Path) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        let mut buf = Vec::with_capacity((sized_offsets.len() + 1) * ENTRY_SIZE);
+        for (&bucket, &offset) in sized_offsets {
             buf.extend_from_slice(&(bucket as u64).to_le_bytes());
-            buf.extend_from_slice(&file.offset().to_le_bytes());
+            buf.extend_from_slice(&offset.to_le_bytes());
         }
         // Unsized file uses u64::MAX as sentinel.
         buf.extend_from_slice(&u64::MAX.to_le_bytes());
-        buf.extend_from_slice(&unsized_file.offset().to_le_bytes());
+        buf.extend_from_slice(&unsized_offset.to_le_bytes());
 
         let tmp_path = self.tmp_path();
         let mut file = OpenOptions::new()
@@ -93,6 +103,11 @@ impl Checkpoint {
         file.write_all(&buf)?;
         file.sync_data()?;
         fs::rename(&tmp_path, &self.path)?;
+        // Fsync the directory so the rename — and any prior data-file
+        // creations in the same directory — survive power loss.
+        if let Some(parent) = self.path.parent() {
+            fsync_dir(parent)?;
+        }
         Ok(())
     }
 }

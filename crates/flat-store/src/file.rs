@@ -82,8 +82,11 @@ impl Writer {
         Ok(())
     }
 
-    pub fn sync(&mut self) -> Result<(), io::Error> {
-        self.file.sync_data()
+    /// Fsync the file and return the current end-offset, captured atomically
+    /// while the writer lock is held.
+    pub fn sync(&mut self) -> Result<u64, io::Error> {
+        self.file.sync_data()?;
+        Ok(self.offset)
     }
 }
 
@@ -101,6 +104,15 @@ impl DataFileRW {
 
     pub fn truncate(&self, offset: u64) -> Result<(), io::Error> {
         self.writer.lock().truncate(offset)
+    }
+
+    /// Fsync and return the synced end-offset. Use this — not `sync()` followed
+    /// by `offset()` — when callers need the offset to reflect what is actually
+    /// durable on disk: a concurrent `insert` can otherwise advance `offset`
+    /// past the synced point, which would let the checkpoint claim durability
+    /// for bytes that haven't been fsynced yet.
+    pub fn sync_to_offset(&self) -> Result<u64, io::Error> {
+        self.writer.lock().sync()
     }
 }
 
@@ -124,7 +136,8 @@ impl FlatStoreWrite for DataFileRW {
     }
 
     fn sync(&self) -> Result<(), io::Error> {
-        self.writer.lock().sync()
+        self.writer.lock().sync()?;
+        Ok(())
     }
 }
 
