@@ -118,6 +118,31 @@ fn batch_insert_deduplicates() {
 }
 
 #[test]
+fn batch_insert_deduplicates_within_batch() {
+    let (db, _dir) = open_db(vec![]);
+
+    let data = b"same preimage";
+    let hash = keccak256(data);
+    let other = b"other";
+    let other_hash = keccak256(other);
+
+    let entries = [
+        (hash, data.to_vec()),
+        (hash, data.to_vec()),
+        (hash, data.to_vec()),
+        (other_hash, other.to_vec()),
+    ];
+
+    let inserted = db
+        .insert_batch(entries.iter().map(|(h, d)| (h, d.as_slice())))
+        .unwrap();
+    assert_eq!(inserted, 2);
+    assert_eq!(db.len().unwrap(), 2);
+    assert_eq!(db.get(&hash).unwrap().unwrap(), data);
+    assert_eq!(db.get(&other_hash).unwrap().unwrap(), other);
+}
+
+#[test]
 fn batch_insert_empty() {
     let (db, _dir) = open_db(vec![]);
 

@@ -3,7 +3,7 @@
 //! Uses [`flat_store`] for bulk byte storage and MDBX for the hash index.
 //! Each MDBX entry is 12 bytes: `[8-byte offset][4-byte len]`.
 
-use std::{fs, path::Path};
+use std::{collections::HashSet, fs, path::Path};
 
 use flat_store::{FlatStoreRO, FlatStoreRW, FlatStoreRead, FlatStoreWrite};
 use libmdbx::{
@@ -174,11 +174,15 @@ impl PreimageDbWrite for PreimageDbRW {
         &self,
         entries: impl IntoIterator<Item = (&'a [u8; 32], &'a [u8])>,
     ) -> Result<usize> {
-        let mut to_insert: Vec<_> = Vec::new();
+        let mut seen = HashSet::<[u8; 32]>::default();
+        let mut to_insert: Vec<(&'a [u8; 32], &'a [u8])> = Vec::new();
         {
             let tx = self.mdbx.begin_ro_txn()?;
             let table = tx.open_table(Some(MDBX_TABLE))?;
             for (hash, data) in entries {
+                if !seen.insert(*hash) {
+                    continue;
+                }
                 if tx.get::<Vec<u8>>(&table, hash.as_slice())?.is_none() {
                     to_insert.push((hash, data));
                 }
