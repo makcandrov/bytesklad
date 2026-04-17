@@ -29,6 +29,14 @@ const VALUE_LEN: usize = 12;
 /// this limit. Sized to comfortably exceed any expected index footprint.
 const MDBX_MAP_SIZE: isize = 1024 * 1024 * 1024 * 1024;
 
+// The map size above doesn't fit in `isize` on 32-bit targets, and MDBX itself
+// is impractical with a 2 GB address space anyway. Fail loudly at compile time
+// rather than silently overflowing or crashing at runtime.
+const _: () = assert!(
+    usize::BITS >= 64,
+    "preimages-db requires a 64-bit target"
+);
+
 /// Read-only preimage database. Any number of read-only handles may coexist
 /// with a single writer.
 pub struct PreimageDbRO {
