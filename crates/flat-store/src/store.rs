@@ -15,6 +15,12 @@ pub enum Error {
 
     #[error("store does not exist or has not been initialized")]
     Empty,
+
+    #[error("bucket mismatch: existing {existing:?}, requested {requested:?}")]
+    BucketMismatch {
+        existing: Vec<usize>,
+        requested: Vec<usize>,
+    },
 }
 
 /// Read-write flat store. Only one writer process may hold the store open at a
@@ -50,9 +56,37 @@ impl FlatStoreRW {
 
         let lock_file = LockFile::new(path)?;
 
-        let mut sized_files = HashMap::new();
         let buckets: Vec<usize> = buckets.into_iter().collect();
 
+        if path.join("unsized").try_exists()? {
+            let mut existing: Vec<usize> = Vec::new();
+            for entry in fs::read_dir(path)? {
+                let entry = entry?;
+                let name = entry.file_name();
+                let Some(name) = name.to_str() else { continue };
+                let Some(rest) = name.strip_prefix("size_") else {
+                    continue;
+                };
+                let Ok(bucket) = rest.parse::<usize>() else {
+                    continue;
+                };
+                existing.push(bucket);
+            }
+            existing.sort_unstable();
+
+            let mut requested = buckets.clone();
+            requested.sort_unstable();
+            requested.dedup();
+
+            if existing != requested {
+                return Err(Error::BucketMismatch {
+                    existing,
+                    requested,
+                });
+            }
+        }
+
+        let mut sized_files = HashMap::new();
         for &bucket in &buckets {
             let file = DataFileRW::open(path.join(format!("size_{bucket}")))?;
             sized_files.insert(bucket, file);
