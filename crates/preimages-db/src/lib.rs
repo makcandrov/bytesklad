@@ -27,6 +27,9 @@ const MDBX_TABLE: &str = "preimages";
 /// 4-byte little-endian length.
 const VALUE_LEN: usize = 12;
 
+/// Encoded MDBX value: `[8-byte offset][4-byte len]`, little-endian.
+type EncodedValue = [u8; VALUE_LEN];
+
 /// Maximum size (1 TB) of the MDBX memory map. This is a virtual address
 /// reservation, not on-disk allocation — the file grows on demand within
 /// this limit. Sized to comfortably exceed any expected index footprint.
@@ -91,24 +94,24 @@ pub enum Error {
 
     #[error("corrupt index entry")]
     CorruptIndex,
+
+    #[error("preimage too large: {0} bytes exceeds u32::MAX")]
+    PreimageTooLarge(usize),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-fn encode_value(offset: u64, len: u32) -> [u8; VALUE_LEN] {
+fn encode_value(offset: u64, len: u32) -> EncodedValue {
     let mut buf = [0u8; VALUE_LEN];
     buf[..8].copy_from_slice(&offset.to_le_bytes());
     buf[8..].copy_from_slice(&len.to_le_bytes());
     buf
 }
 
-fn decode_value(raw: &[u8]) -> Result<(u64, usize)> {
-    if raw.len() != VALUE_LEN {
-        return Err(Error::CorruptIndex);
-    }
+fn decode_value(raw: &EncodedValue) -> (u64, usize) {
     let offset = u64::from_le_bytes(raw[..8].try_into().unwrap());
     let len = u32::from_le_bytes(raw[8..12].try_into().unwrap()) as usize;
-    Ok((offset, len))
+    (offset, len)
 }
 
 impl PreimagesDbRW {
@@ -191,10 +194,12 @@ impl PreimagesDbWrite for PreimagesDbRW {
             return Ok(false);
         }
 
+        let len = u32::try_from(data.len()).map_err(|_| Error::PreimageTooLarge(data.len()))?;
+
         let offset = self.store.insert(data)?;
         self.store.sync()?;
 
-        let value = encode_value(offset, u32::try_from(data.len()).unwrap());
+        let value = encode_value(offset, len);
         tx.put(
             &table,
             hash.as_slice(),
@@ -219,8 +224,9 @@ impl PreimagesDbWrite for PreimagesDbRW {
             if tx.get::<()>(&table, hash.as_slice())?.is_some() {
                 continue;
             }
+            let len = u32::try_from(data.len()).map_err(|_| Error::PreimageTooLarge(data.len()))?;
             let offset = self.store.insert(data)?;
-            let value = encode_value(offset, u32::try_from(data.len()).unwrap());
+            let value = encode_value(offset, len);
             tx.put(
                 &table,
                 hash.as_slice(),
@@ -271,13 +277,13 @@ fn db_get(
 ) -> Result<Option<Vec<u8>>> {
     let tx = mdbx.begin_ro_txn()?;
     let table = tx.open_table(Some(MDBX_TABLE))?;
-    let raw: Option<Vec<u8>> = tx.get(&table, hash.as_slice())?;
+    let raw: Option<EncodedValue> = tx.get(&table, hash.as_slice())?;
 
     let Some(raw) = raw else {
         return Ok(None);
     };
 
-    let (offset, len) = decode_value(&raw)?;
+    let (offset, len) = decode_value(&raw);
     let data = store.read_to_vec(offset, len)?;
     Ok(Some(data))
 }
@@ -303,9 +309,9 @@ fn db_nearest_lower(
     let table = tx.open_table(Some(MDBX_TABLE))?;
     let mut cursor = tx.cursor(&table)?;
 
-    let result = match cursor.set_range::<Vec<u8>, Vec<u8>>(hash.as_slice())? {
-        Some((key, value)) if key.as_slice() == hash.as_slice() => Some((key, value)),
-        _ => cursor.prev::<Vec<u8>, Vec<u8>>()?,
+    let result = match cursor.set_range::<[u8; 32], EncodedValue>(hash.as_slice())? {
+        Some((key, value)) if &key == hash => Some((key, value)),
+        _ => cursor.prev::<[u8; 32], EncodedValue>()?,
     };
 
     read_cursor_result(store, result)
@@ -320,20 +326,19 @@ fn db_nearest_upper(
     let table = tx.open_table(Some(MDBX_TABLE))?;
     let mut cursor = tx.cursor(&table)?;
 
-    let result = cursor.set_range::<Vec<u8>, Vec<u8>>(hash.as_slice())?;
+    let result = cursor.set_range::<[u8; 32], EncodedValue>(hash.as_slice())?;
 
     read_cursor_result(store, result)
 }
 
 fn read_cursor_result(
     store: &impl FlatStoreRead,
-    result: Option<(Vec<u8>, Vec<u8>)>,
+    result: Option<([u8; 32], EncodedValue)>,
 ) -> Result<Option<([u8; 32], Vec<u8>)>> {
-    let Some((key, value)) = result else {
+    let Some((hash, value)) = result else {
         return Ok(None);
     };
-    let hash: [u8; 32] = key.try_into().map_err(|_| Error::CorruptIndex)?;
-    let (offset, len) = decode_value(&value)?;
+    let (offset, len) = decode_value(&value);
     let data = store.read_to_vec(offset, len)?;
     Ok(Some((hash, data)))
 }
