@@ -194,7 +194,7 @@ impl PreimagesDbWrite for PreimagesDbRW {
         let offset = self.store.insert(data)?;
         self.store.sync()?;
 
-        let value = encode_value(offset, data.len() as u32);
+        let value = encode_value(offset, u32::try_from(data.len()).unwrap());
         tx.put(
             &table,
             hash.as_slice(),
@@ -220,7 +220,7 @@ impl PreimagesDbWrite for PreimagesDbRW {
                 continue;
             }
             let offset = self.store.insert(data)?;
-            let value = encode_value(offset, data.len() as u32);
+            let value = encode_value(offset, u32::try_from(data.len()).unwrap());
             tx.put(
                 &table,
                 hash.as_slice(),
