@@ -59,8 +59,10 @@ use preimages_db::{PreimagesDbRW, PreimagesDbRead, PreimagesDbWrite};
 // Declare fixed-size buckets up front; everything else spills to `unsized`.
 let db = PreimagesDbRW::open("./preimages", [32, 64]).unwrap();
 
-let hash = [0u8; 32];
-let data = &[0u8; 32];
+let data = b"hello world";
+// In real usage: `let hash = keccak256(data);`
+let hash = [0; 32];
+
 db.insert(&hash, data).unwrap();
 let _data = db.get(&hash).unwrap();
 ```

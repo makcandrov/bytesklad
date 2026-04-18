@@ -25,12 +25,24 @@ pub trait PreimagesDbRead {
 }
 
 /// Read-write access to a preimage database.
+///
+/// # Failure semantics
+///
+/// Writes are ordered data-then-index: the MDBX index never references data
+/// absent from the flat store. The reverse (flat-store bytes with no index
+/// entry) can occur on write failure — those bytes are a silent space leak
+/// with no garbage-collection path. This trade is intentional: losing a
+/// pointer into missing data would surface as a read-time error, whereas
+/// leaked bytes are merely wasted disk.
 pub trait PreimagesDbWrite: PreimagesDbRead {
     /// Insert a single preimage. Returns `true` if newly inserted.
     ///
     /// Each call fsyncs both the data file and the MDBX index so the entry is
     /// durable on return. For many inserts, prefer [`insert_batch`] — it
     /// performs a single fsync for the whole batch.
+    ///
+    /// On failure after the data fsync but before the index commit, the
+    /// written bytes are leaked in the flat store (see trait-level docs).
     ///
     /// [`insert_batch`]: PreimagesDbWrite::insert_batch
     fn insert(&self, hash: &[u8; 32], data: &[u8]) -> Result<bool>;
@@ -39,6 +51,13 @@ pub trait PreimagesDbWrite: PreimagesDbRead {
     ///
     /// The whole batch is made durable with a single fsync per store, so this
     /// is the preferred path for bulk ingest.
+    ///
+    /// On any error the MDBX transaction is aborted and no index entries are
+    /// committed. Bytes appended to the flat store earlier in the batch sit
+    /// past the checkpoint until the final sync, so in most in-batch
+    /// failures they are truncated on the next open — no leak. A failure
+    /// between the final store sync and the MDBX commit still leaks those
+    /// bytes (see trait-level docs).
     fn insert_batch<'a>(
         &self,
         entries: impl IntoIterator<Item = (&'a [u8; 32], &'a [u8])>,
