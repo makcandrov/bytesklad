@@ -187,7 +187,7 @@ impl PreimagesDbWrite for PreimagesDbRW {
         let tx = self.mdbx.begin_rw_txn()?;
         let table = tx.open_table(Some(MDBX_TABLE))?;
 
-        if tx.get::<Vec<u8>>(&table, hash.as_slice())?.is_some() {
+        if tx.get::<()>(&table, hash.as_slice())?.is_some() {
             return Ok(false);
         }
 
@@ -216,7 +216,7 @@ impl PreimagesDbWrite for PreimagesDbRW {
 
         let mut count = 0;
         for (hash, data) in entries {
-            if tx.get::<Vec<u8>>(&table, hash.as_slice())?.is_some() {
+            if tx.get::<()>(&table, hash.as_slice())?.is_some() {
                 continue;
             }
             let offset = self.store.insert(data)?;
@@ -285,7 +285,7 @@ fn db_get(
 fn db_contains(mdbx: &Database<NoWriteMap>, hash: &[u8; 32]) -> Result<bool> {
     let tx = mdbx.begin_ro_txn()?;
     let table = tx.open_table(Some(MDBX_TABLE))?;
-    Ok(tx.get::<Vec<u8>>(&table, hash.as_slice())?.is_some())
+    Ok(tx.get::<()>(&table, hash.as_slice())?.is_some())
 }
 
 fn db_len(mdbx: &Database<NoWriteMap>) -> Result<usize> {
