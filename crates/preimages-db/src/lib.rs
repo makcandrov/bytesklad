@@ -311,6 +311,9 @@ fn db_nearest_lower(
 
     let result = match cursor.set_range::<[u8; 32], EncodedValue>(hash.as_slice())? {
         Some((key, value)) if &key == hash => Some((key, value)),
+        // When `set_range` returns `None` (hash exceeds every stored key),
+        // MDBX leaves the cursor past the end so `prev` returns the last
+        // entry. Pinned by `nearest_lower_hash_above_all_keys`.
         _ => cursor.prev::<[u8; 32], EncodedValue>()?,
     };
 

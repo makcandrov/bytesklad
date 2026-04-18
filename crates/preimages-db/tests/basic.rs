@@ -261,6 +261,40 @@ fn concurrent_inserts_from_multiple_threads() {
 }
 
 #[test]
+fn nearest_lower_hash_above_all_keys() {
+    let (db, _dir) = open_db(vec![]);
+
+    let entries: Vec<([u8; 32], Vec<u8>)> = (0..10u32)
+        .map(|i| {
+            let data = i.to_le_bytes().to_vec();
+            (keccak256(&data), data)
+        })
+        .collect();
+    for (h, d) in &entries {
+        db.insert(h, d).unwrap();
+    }
+
+    let (max_hash, max_data) = entries.iter().max_by_key(|(h, _)| *h).unwrap();
+
+    // `[0xFF; 32]` is the maximum 256-bit value; keccak256 will effectively
+    // never produce it, so it reliably exceeds every inserted hash. Pins the
+    // MDBX cursor-after-failed-set_range behavior relied on in
+    // `db_nearest_lower`.
+    let query = [0xFF; 32];
+    assert!(query > *max_hash);
+
+    let (got_hash, got_data) = db.nearest_lower(&query).unwrap().unwrap();
+    assert_eq!(got_hash, *max_hash);
+    assert_eq!(got_data, *max_data);
+}
+
+#[test]
+fn nearest_lower_empty_table() {
+    let (db, _dir) = open_db(vec![]);
+    assert!(db.nearest_lower(&[0xFF; 32]).unwrap().is_none());
+}
+
+#[test]
 fn various_sizes() {
     let (db, _dir) = open_db(vec![]);
 
