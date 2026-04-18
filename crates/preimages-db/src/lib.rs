@@ -6,7 +6,7 @@
 //! Uses [`flat_store`] for bulk byte storage and MDBX for the hash index.
 //! Each MDBX entry is 12 bytes: `[8-byte offset][4-byte len]`.
 
-use std::{collections::HashSet, fs, path::Path};
+use std::{fs, path::Path};
 
 use flat_store::{FlatStoreRO, FlatStoreRW, FlatStoreRead, FlatStoreWrite};
 use libmdbx::{
@@ -184,7 +184,10 @@ impl PreimagesDbRead for PreimagesDbRW {
 
 impl PreimagesDbWrite for PreimagesDbRW {
     fn insert(&self, hash: &[u8; 32], data: &[u8]) -> Result<bool> {
-        if self.contains(hash)? {
+        let tx = self.mdbx.begin_rw_txn()?;
+        let table = tx.open_table(Some(MDBX_TABLE))?;
+
+        if tx.get::<Vec<u8>>(&table, hash.as_slice())?.is_some() {
             return Ok(false);
         }
 
@@ -192,8 +195,6 @@ impl PreimagesDbWrite for PreimagesDbRW {
         self.store.sync()?;
 
         let value = encode_value(offset, data.len() as u32);
-        let tx = self.mdbx.begin_rw_txn()?;
-        let table = tx.open_table(Some(MDBX_TABLE))?;
         tx.put(
             &table,
             hash.as_slice(),
@@ -210,43 +211,30 @@ impl PreimagesDbWrite for PreimagesDbRW {
         &self,
         entries: impl IntoIterator<Item = (&'a [u8; 32], &'a [u8])>,
     ) -> Result<usize> {
-        let mut seen = HashSet::<[u8; 32]>::default();
-        let mut to_insert: Vec<(&'a [u8; 32], &'a [u8])> = Vec::new();
-        {
-            let tx = self.mdbx.begin_ro_txn()?;
-            let table = tx.open_table(Some(MDBX_TABLE))?;
-            for (hash, data) in entries {
-                if !seen.insert(*hash) {
-                    continue;
-                }
-                if tx.get::<Vec<u8>>(&table, hash.as_slice())?.is_none() {
-                    to_insert.push((hash, data));
-                }
-            }
-        }
-
-        if to_insert.is_empty() {
-            return Ok(0);
-        }
-
-        let mut offsets = Vec::with_capacity(to_insert.len());
-        for (_, data) in &to_insert {
-            offsets.push(self.store.insert(data)?);
-        }
-        self.store.sync()?;
-
-        let count = to_insert.len();
         let tx = self.mdbx.begin_rw_txn()?;
         let table = tx.open_table(Some(MDBX_TABLE))?;
-        for (i, (hash, data)) in to_insert.iter().enumerate() {
-            let value = encode_value(offsets[i], data.len() as u32);
+
+        let mut count = 0;
+        for (hash, data) in entries {
+            if tx.get::<Vec<u8>>(&table, hash.as_slice())?.is_some() {
+                continue;
+            }
+            let offset = self.store.insert(data)?;
+            let value = encode_value(offset, data.len() as u32);
             tx.put(
                 &table,
                 hash.as_slice(),
                 value.as_slice(),
                 WriteFlags::NO_OVERWRITE,
             )?;
+            count += 1;
         }
+
+        if count == 0 {
+            return Ok(0);
+        }
+
+        self.store.sync()?;
         tx.commit()?;
         self.mdbx.sync(true)?;
 
