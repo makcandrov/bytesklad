@@ -11,11 +11,11 @@ license.workspace = true
 flat-store.workspace = true
 libmdbx.workspace = true
 thiserror.workspace = true
-sdecode-preimages-interface = { workspace = true, optional = true }
+alloy-preimages = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile.workspace = true
 tiny-keccak.workspace = true
 
 [features]
-sdecode = ["dep:sdecode-preimages-interface"]
+alloy-preimages = ["dep:alloy-preimages"]

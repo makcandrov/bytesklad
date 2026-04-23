@@ -1,4 +1,4 @@
-use sdecode_preimages_interface::{
+use alloy_preimages::{
     Image, Preimage, PreimageEntry, PreimageEntryRef, PreimagesProvider, PreimagesWriter,
 };
 

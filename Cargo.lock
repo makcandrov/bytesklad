@@ -18,6 +18,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
 
 [[package]]
+name = "alloy-preimages"
+version = "0.1.0"
+source = "git+https://github.com/makcandrov/alloy-preimages#27447b68a0509951ca1dd4f60216c2360411cb6f"
+dependencies = [
+ "alloy-primitives",
+ "auto_impl",
+ "quick-impl",
+]
+
+[[package]]
 name = "alloy-primitives"
 version = "1.5.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -522,9 +532,9 @@ dependencies = [
 name = "preimages-db"
 version = "0.1.0"
 dependencies = [
+ "alloy-preimages",
  "flat-store",
  "libmdbx",
- "sdecode-preimages-interface",
  "tempfile",
  "thiserror",
  "tiny-keccak",
@@ -678,9 +688,9 @@ checksum = "dc897dd8d9e8bd1ed8cdad82b5966c3e0ecae09fb1907d58efaa013543185d0a"
 
 [[package]]
 name = "ruint"
-version = "1.17.2"
+version = "1.18.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c141e807189ad38a07276942c6623032d3753c8859c146104ac2e4d68865945a"
+checksum = "0298da754d1395046b0afdc2f20ee76d29a8ae310cd30ffa84ed42acba9cb12a"
 dependencies = [
  "proptest",
  "rand 0.8.6",
@@ -730,16 +740,6 @@ name = "scopeguard"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
-
-[[package]]
-name = "sdecode-preimages-interface"
-version = "0.1.0"
-source = "git+https://github.com/makcandrov/sdecode#fd7402d92c3f6c193d5f9916c62f37a402ef9464"
-dependencies = [
- "alloy-primitives",
- "auto_impl",
- "quick-impl",
-]
 
 [[package]]
 name = "sealed"
@@ -802,9 +802,9 @@ dependencies = [
 
 [[package]]
 name = "sha3"
-version = "0.10.8"
+version = "0.10.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "75872d278a8f37ef87fa0ddbda7802605cb18344497949862c0d4dcb291eba60"
+checksum = "77fd7028345d415a4034cf8777cd4f8ab1851274233b45f84e3d955502d93874"
 dependencies = [
  "digest",
  "keccak",
@@ -877,9 +877,9 @@ dependencies = [
 
 [[package]]
 name = "typenum"
-version = "1.19.0"
+version = "1.20.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "562d481066bde0658276a35467c4af00bdc6ee726305698a55b86e61d7ad82bb"
+checksum = "40ce102ab67701b8526c123c1bab5cbe42d7040ccfd0f64af1a385808d2f43de"
 
 [[package]]
 name = "unarray"

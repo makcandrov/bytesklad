@@ -17,8 +17,8 @@ use libmdbx::{
 mod traits;
 pub use traits::{PreimagesDbRead, PreimagesDbWrite};
 
-#[cfg(feature = "sdecode")]
-mod sdecode;
+#[cfg(feature = "alloy-preimages")]
+mod alloy;
 
 /// Name of the MDBX table that stores the `hash → (offset, len)` index.
 const MDBX_TABLE: &str = "preimages";
