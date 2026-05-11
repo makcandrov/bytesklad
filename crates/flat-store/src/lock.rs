@@ -1,4 +1,3 @@
-#[cfg(windows)]
 use std::{fs::File, io};
 use std::{fs::OpenOptions, path::Path};
 
