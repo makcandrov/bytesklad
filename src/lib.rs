@@ -6,22 +6,27 @@ use std::path::{Path, PathBuf};
 use libmdbx::WriteFlags;
 
 mod error;
-mod index;
-mod lock;
-mod options;
-pub(crate) mod store;
-mod sys;
-mod traits;
-mod varint;
-
 pub use error::{Error, Result};
+
+mod index;
+use index::Index;
+
+mod lock;
+use lock::LockFile;
+
+mod options;
 pub use options::{DEFAULT_INDEX_MAP_SIZE, Options};
+
+mod store;
+use store::{Pointer, Store};
 pub use store::DEFAULT_SEGMENT_SIZE;
+
+mod sys;
+
+mod traits;
 pub use traits::{DbRead, DbWrite};
 
-use index::Index;
-use lock::LockFile;
-use store::{Pointer, Store};
+mod varint;
 
 // MDBX is impractical in a 2 GB address space, and the default map size does
 // not fit in `isize` there either. Fail at compile time rather than at runtime.

@@ -1,6 +1,6 @@
 use std::io;
 
-/// Errors returned by every fallible operation in this crate.
+/// Errors returned by every fallible `bytesklad` operation.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error(transparent)]
@@ -52,6 +52,7 @@ pub enum Error {
     },
 }
 
+/// A `Result` alias whose error type is [`Error`].
 pub type Result<T> = std::result::Result<T, Error>;
 
 impl Error {
