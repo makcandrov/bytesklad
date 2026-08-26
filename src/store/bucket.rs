@@ -1,11 +1,11 @@
 use std::{
-    collections::HashMap,
     fs::{self, OpenOptions},
     path::{Path, PathBuf},
     sync::Arc,
 };
 
 use parking_lot::{Mutex, RwLock};
+use rustc_hash::FxHashMap;
 
 use crate::{
     Error, Result,
@@ -48,7 +48,7 @@ pub(crate) struct Bucket {
     dir: PathBuf,
     /// Segment readers are opened on demand and cached, so a reader process
     /// picks up segments the writer created after the reader started.
-    readers: RwLock<HashMap<u32, Arc<SegmentReader>>>,
+    readers: RwLock<FxHashMap<u32, Arc<SegmentReader>>>,
     /// `Some` only for the writer; the mutex makes concurrent inserts on one
     /// bucket safe within the writing process.
     active: Option<Mutex<Active>>,
@@ -60,7 +60,7 @@ impl Bucket {
             kind,
             segment_size,
             dir,
-            readers: RwLock::new(HashMap::new()),
+            readers: RwLock::new(FxHashMap::default()),
             active: None,
         }
     }
@@ -86,7 +86,7 @@ impl Bucket {
             kind,
             segment_size,
             dir,
-            readers: RwLock::new(HashMap::new()),
+            readers: RwLock::new(FxHashMap::default()),
             active: Some(Mutex::new(Active {
                 id: segment,
                 writer,

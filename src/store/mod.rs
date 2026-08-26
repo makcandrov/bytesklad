@@ -1,5 +1,4 @@
 use std::{
-    collections::HashMap,
     path::{Path, PathBuf},
     sync::{
         Arc,
@@ -8,6 +7,7 @@ use std::{
 };
 
 use parking_lot::{Mutex, RwLock};
+use rustc_hash::FxHashMap;
 
 use crate::{Error, Options, Result};
 
@@ -34,7 +34,7 @@ pub(crate) struct Store {
     /// to the same bucket for the life of the database.
     buckets: RwLock<Vec<Arc<Bucket>>>,
     /// Record length to bucket tag, for routing writes.
-    routing: HashMap<usize, u8>,
+    routing: FxHashMap<usize, u8>,
     bucket_sizes: Vec<usize>,
     /// Serializes `sync` so concurrent callers cannot interleave their fsyncs
     /// with the checkpoint write and publish a frontier for unsynced bytes.
@@ -223,7 +223,7 @@ fn kinds(registry: &Registry) -> Vec<(u8, Kind)> {
         .collect()
 }
 
-fn routing(registry: &Registry) -> HashMap<usize, u8> {
+fn routing(registry: &Registry) -> FxHashMap<usize, u8> {
     registry
         .buckets
         .iter()

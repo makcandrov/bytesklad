@@ -1,4 +1,6 @@
-use std::{collections::HashMap, fs, io, path::Path};
+use std::{fs, io, path::Path};
+
+use rustc_hash::FxHashMap;
 
 use crate::{Error, Result, sys};
 
@@ -15,7 +17,7 @@ const FILE: &str = "checkpoint";
 /// entry — the store is always fsynced and checkpointed *before* the index
 /// transaction that names those bytes commits — so a writer may truncate them
 /// on reopen.
-pub(crate) type Frontiers = HashMap<u8, (u32, u64)>;
+pub(crate) type Frontiers = FxHashMap<u8, (u32, u64)>;
 
 pub(crate) fn load(dir: &Path) -> Result<Frontiers> {
     // A torn or missing checkpoint is not an error: `atomic_write` guarantees
@@ -25,7 +27,7 @@ pub(crate) fn load(dir: &Path) -> Result<Frontiers> {
     // frontier.
     let raw = match fs::read(dir.join(FILE)) {
         Ok(raw) => raw,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Frontiers::new()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Frontiers::default()),
         Err(e) => return Err(e.into()),
     };
 
