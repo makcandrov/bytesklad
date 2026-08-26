@@ -1,34 +1,35 @@
-use std::path::Path;
-
-use crate::{DbRO, DbRW, Result};
+use crate::{Error, Result, store::DEFAULT_SEGMENT_SIZE};
 
 /// Default upper bound on the index's memory map. This reserves address
 /// space, not disk: the index file grows on demand within the limit.
 pub const DEFAULT_INDEX_MAP_SIZE: u64 = 4 * 1024 * 1024 * 1024 * 1024;
 
-/// How a database is opened.
+/// The configuration a database is created with.
 ///
-/// Every setting has a usable default, so the shortest way to open a database
-/// with 32-byte keys and no size buckets is [`DbRW::open`].
+/// Passed to [`DbRW::open_or_create`] and [`DbRO::open_or_create`], which
+/// create a database with exactly this configuration when there is none at the
+/// path, and otherwise require the one already there to match it. Nothing here
+/// is needed to open a database that exists: [`DbRW::open`] and [`DbRO::open`]
+/// read the whole configuration back from disk.
 ///
 /// ```no_run
 /// # fn main() -> Result<(), bytesklad::Error> {
-/// use bytesklad::Options;
+/// use bytesklad::{DbRW, Options};
 ///
 /// // Values of exactly 32 or 64 bytes get their own bucket; everything else
 /// // goes to the variable-length bucket.
-/// let db = Options::new().buckets([32, 64]).open::<32>("./db")?;
+/// let db = DbRW::<32>::open_or_create("./db", &Options::new().buckets([32, 64]))?;
 /// # Ok(()) }
 /// ```
 ///
-/// Buckets are *declarative*: opening an existing database asks for those
-/// buckets to exist. Ones already present are reused, new ones are added, and
-/// none are ever removed — so passing no buckets to an existing database keeps
-/// whatever it already has rather than discarding it.
+/// [`DbRW::open`]: crate::DbRW::open
+/// [`DbRW::open_or_create`]: crate::DbRW::open_or_create
+/// [`DbRO::open`]: crate::DbRO::open
+/// [`DbRO::open_or_create`]: crate::DbRO::open_or_create
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Options {
     pub(crate) buckets: Vec<usize>,
-    pub(crate) segment_size: Option<u64>,
+    pub(crate) segment_size: u64,
     pub(crate) index_map_size: u64,
 }
 
@@ -36,7 +37,7 @@ impl Default for Options {
     fn default() -> Self {
         Self {
             buckets: Vec::new(),
-            segment_size: None,
+            segment_size: DEFAULT_SEGMENT_SIZE,
             index_map_size: DEFAULT_INDEX_MAP_SIZE,
         }
     }
@@ -68,37 +69,34 @@ impl Options {
         self
     }
 
-    /// Cap on the size of one segment file, defaulting to 4 GiB.
+    /// Cap on the size of one segment file, defaulting to
+    /// [`DEFAULT_SEGMENT_SIZE`].
     ///
-    /// Fixed when the database is created and rejected on later opens if it
-    /// disagrees, because stored pointers are decoded against it. Larger
-    /// segments mean fewer, bigger files; smaller ones mean finer-grained
-    /// backup and replication units, and more open file descriptors.
+    /// Larger segments mean fewer, bigger files; smaller ones mean
+    /// finer-grained backup and replication units, and more open file
+    /// descriptors.
     pub fn segment_size(mut self, bytes: u64) -> Self {
-        self.segment_size = Some(bytes);
+        self.segment_size = bytes;
         self
     }
 
     /// Upper bound on the index's memory map, defaulting to
     /// [`DEFAULT_INDEX_MAP_SIZE`]. Raise it if the index may exceed 4 TiB.
+    ///
+    /// Unlike the rest of these settings this one is not part of the
+    /// database's stored configuration, so it is never matched against disk.
     pub fn index_map_size(mut self, bytes: u64) -> Self {
         self.index_map_size = bytes;
         self
     }
 
-    /// Open for reading and writing, creating the database if absent.
-    ///
-    /// `K` is the key length in bytes, fixed at creation.
-    pub fn open<const K: usize>(&self, path: impl AsRef<Path>) -> Result<DbRW<K>> {
-        DbRW::open_with(path, self)
-    }
-
-    /// Open an existing database for reading.
-    ///
-    /// Bucket layout, segment size and key length are all read back from the
-    /// database itself, so none of them need to be declared here; only
-    /// [`index_map_size`](Self::index_map_size) still applies.
-    pub fn open_read_only<const K: usize>(&self, path: impl AsRef<Path>) -> Result<DbRO<K>> {
-        DbRO::open_with(path, self)
+    pub(crate) fn validate(&self) -> Result<()> {
+        if self.segment_size == 0 {
+            return Err(Error::ZeroSegmentSize);
+        }
+        if self.buckets.contains(&0) {
+            return Err(Error::ZeroBucket);
+        }
+        Ok(())
     }
 }

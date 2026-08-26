@@ -27,7 +27,7 @@ fn count_segments(root: &std::path::Path, tag: u8) -> usize {
 #[test]
 fn insert_and_get_without_buckets() {
     let dir = tempfile::tempdir().unwrap();
-    let db = DbRW::<32>::open(dir.path()).unwrap();
+    let db = DbRW::<32>::open_or_create(dir.path(), &Options::new()).unwrap();
 
     assert!(db.buckets().is_empty());
 
@@ -48,10 +48,7 @@ fn insert_and_get_without_buckets() {
 #[test]
 fn insert_and_get_with_buckets() {
     let dir = tempfile::tempdir().unwrap();
-    let db = Options::new()
-        .buckets([32, 64])
-        .open::<32>(dir.path())
-        .unwrap();
+    let db = DbRW::<32>::open_or_create(dir.path(), &Options::new().buckets([32, 64])).unwrap();
 
     assert_eq!(db.buckets(), &[32, 64]);
 
@@ -74,7 +71,7 @@ fn insert_and_get_with_buckets() {
 #[test]
 fn duplicate_insert_is_rejected() {
     let dir = tempfile::tempdir().unwrap();
-    let db = DbRW::<32>::open(dir.path()).unwrap();
+    let db = DbRW::<32>::open_or_create(dir.path(), &Options::new()).unwrap();
 
     assert!(db.insert(&key(1), b"first").unwrap());
     assert!(!db.insert(&key(1), b"second").unwrap());
@@ -85,7 +82,7 @@ fn duplicate_insert_is_rejected() {
 #[test]
 fn batch_skips_duplicates_within_itself() {
     let dir = tempfile::tempdir().unwrap();
-    let db = DbRW::<32>::open(dir.path()).unwrap();
+    let db = DbRW::<32>::open_or_create(dir.path(), &Options::new()).unwrap();
 
     let entries = [
         (key(1), b"a".to_vec()),
@@ -103,7 +100,7 @@ fn batch_skips_duplicates_within_itself() {
 #[test]
 fn empty_batch_is_a_no_op() {
     let dir = tempfile::tempdir().unwrap();
-    let db = DbRW::<32>::open(dir.path()).unwrap();
+    let db = DbRW::<32>::open_or_create(dir.path(), &Options::new()).unwrap();
     assert_eq!(db.insert_batch(std::iter::empty()).unwrap(), 0);
     assert!(db.is_empty().unwrap());
 }
@@ -111,7 +108,7 @@ fn empty_batch_is_a_no_op() {
 #[test]
 fn ordered_navigation() {
     let dir = tempfile::tempdir().unwrap();
-    let db = DbRW::<32>::open(dir.path()).unwrap();
+    let db = DbRW::<32>::open_or_create(dir.path(), &Options::new()).unwrap();
 
     for n in [10u64, 20, 30] {
         db.insert(&key(n), &value(n, 40)).unwrap();
@@ -132,7 +129,7 @@ fn ordered_navigation() {
 #[test]
 fn nearest_lower_above_all_keys() {
     let dir = tempfile::tempdir().unwrap();
-    let db = DbRW::<32>::open(dir.path()).unwrap();
+    let db = DbRW::<32>::open_or_create(dir.path(), &Options::new()).unwrap();
 
     db.insert(&key(1), b"one").unwrap();
     db.insert(&key(2), b"two").unwrap();
@@ -147,7 +144,7 @@ fn data_survives_reopen() {
     let dir = tempfile::tempdir().unwrap();
 
     {
-        let db = Options::new().bucket(48).open::<32>(dir.path()).unwrap();
+        let db = DbRW::<32>::open_or_create(dir.path(), &Options::new().bucket(48)).unwrap();
         for n in 0..32 {
             db.insert(&key(n), &value(n, if n % 2 == 0 { 48 } else { 77 }))
                 .unwrap();
@@ -166,48 +163,9 @@ fn data_survives_reopen() {
 }
 
 #[test]
-fn buckets_can_be_added_later_without_moving_old_records() {
-    let dir = tempfile::tempdir().unwrap();
-
-    {
-        let db = DbRW::<32>::open(dir.path()).unwrap();
-        db.insert(&key(1), &value(1, 32)).unwrap();
-    }
-
-    let db = Options::new().bucket(32).open::<32>(dir.path()).unwrap();
-    db.insert(&key(2), &value(2, 32)).unwrap();
-
-    // The pre-existing record stays in the variable-length bucket and remains
-    // readable; only the new one lands in the freshly declared bucket.
-    assert_eq!(db.get(&key(1)).unwrap().unwrap(), value(1, 32));
-    assert_eq!(db.get(&key(2)).unwrap().unwrap(), value(2, 32));
-    assert_eq!(db.buckets(), &[32]);
-}
-
-#[test]
-fn declaring_fewer_buckets_keeps_the_existing_ones() {
-    let dir = tempfile::tempdir().unwrap();
-
-    {
-        let db = Options::new()
-            .buckets([32, 64])
-            .open::<32>(dir.path())
-            .unwrap();
-        db.insert(&key(1), &value(1, 64)).unwrap();
-    }
-
-    let db = Options::new().bucket(32).open::<32>(dir.path()).unwrap();
-    assert_eq!(db.buckets(), &[32, 64]);
-    assert_eq!(db.get(&key(1)).unwrap().unwrap(), value(1, 64));
-}
-
-#[test]
 fn segments_roll_over_and_stay_readable() {
     let dir = tempfile::tempdir().unwrap();
-    let db = Options::new()
-        .segment_size(1024)
-        .bucket(100)
-        .open::<32>(dir.path())
+    let db = DbRW::<32>::open_or_create(dir.path(), &Options::new().segment_size(1024).bucket(100))
         .unwrap();
 
     for n in 0..100 {
@@ -225,10 +183,7 @@ fn segments_roll_over_and_stay_readable() {
 #[test]
 fn record_larger_than_a_segment_gets_its_own() {
     let dir = tempfile::tempdir().unwrap();
-    let db = Options::new()
-        .segment_size(1024)
-        .open::<32>(dir.path())
-        .unwrap();
+    let db = DbRW::<32>::open_or_create(dir.path(), &Options::new().segment_size(1024)).unwrap();
 
     db.insert(&key(1), &value(1, 10)).unwrap();
     db.insert(&key(2), &value(2, 5000)).unwrap();
@@ -243,7 +198,7 @@ fn record_larger_than_a_segment_gets_its_own() {
 #[test]
 fn values_spanning_the_probe_boundary() {
     let dir = tempfile::tempdir().unwrap();
-    let db = DbRW::<32>::open(dir.path()).unwrap();
+    let db = DbRW::<32>::open_or_create(dir.path(), &Options::new()).unwrap();
 
     // Straddles the 512-byte speculative read in both directions, and crosses
     // the one-to-two byte length-prefix boundary.
@@ -268,10 +223,7 @@ fn values_spanning_the_probe_boundary() {
 fn concurrent_writers_and_readers_in_one_process() {
     let dir = tempfile::tempdir().unwrap();
     let db = Arc::new(
-        Options::new()
-            .buckets([32, 64])
-            .open::<32>(dir.path())
-            .unwrap(),
+        DbRW::<32>::open_or_create(dir.path(), &Options::new().buckets([32, 64])).unwrap(),
     );
 
     // Pre-populate so the readers have something to hammer on.
@@ -328,23 +280,14 @@ fn concurrent_writers_and_readers_in_one_process() {
 #[test]
 fn only_one_writer_at_a_time() {
     let dir = tempfile::tempdir().unwrap();
-    let _db = DbRW::<32>::open(dir.path()).unwrap();
+    let _db = DbRW::<32>::open_or_create(dir.path(), &Options::new()).unwrap();
     assert!(matches!(DbRW::<32>::open(dir.path()), Err(Error::Locked)));
-}
-
-#[test]
-fn opening_a_missing_database_read_only_fails_cleanly() {
-    let dir = tempfile::tempdir().unwrap();
-    assert!(matches!(
-        DbRO::<32>::open(dir.path().join("nope")),
-        Err(Error::NotInitialized)
-    ));
 }
 
 #[test]
 fn key_length_is_fixed_at_creation() {
     let dir = tempfile::tempdir().unwrap();
-    drop(DbRW::<32>::open(dir.path()).unwrap());
+    drop(DbRW::<32>::open_or_create(dir.path(), &Options::new()).unwrap());
 
     assert!(matches!(
         DbRW::<20>::open(dir.path()),
@@ -356,41 +299,9 @@ fn key_length_is_fixed_at_creation() {
 }
 
 #[test]
-fn segment_size_is_fixed_at_creation() {
-    let dir = tempfile::tempdir().unwrap();
-    drop(
-        Options::new()
-            .segment_size(4096)
-            .open::<32>(dir.path())
-            .unwrap(),
-    );
-
-    assert!(matches!(
-        Options::new().segment_size(8192).open::<32>(dir.path()),
-        Err(Error::SegmentSizeMismatch {
-            stored: 4096,
-            requested: 8192
-        })
-    ));
-
-    // Not asking for one is fine: the stored value is used.
-    let db = DbRW::<32>::open(dir.path()).unwrap();
-    assert_eq!(db.segment_size(), 4096);
-}
-
-#[test]
-fn zero_sized_bucket_is_rejected() {
-    let dir = tempfile::tempdir().unwrap();
-    assert!(matches!(
-        Options::new().bucket(0).open::<32>(dir.path()),
-        Err(Error::ZeroBucket)
-    ));
-}
-
-#[test]
 fn keys_of_other_lengths() {
     let dir = tempfile::tempdir().unwrap();
-    let db = DbRW::<8>::open(dir.path()).unwrap();
+    let db = DbRW::<8>::open_or_create(dir.path(), &Options::new()).unwrap();
 
     db.insert(&[1, 2, 3, 4, 5, 6, 7, 8], b"eight-byte key")
         .unwrap();
@@ -406,7 +317,7 @@ fn bytes_written_past_the_checkpoint_are_truncated() {
     let segment = dir.path().join("store").join("b000").join("0000000000.seg");
 
     {
-        let db = DbRW::<32>::open(dir.path()).unwrap();
+        let db = DbRW::<32>::open_or_create(dir.path(), &Options::new()).unwrap();
         for n in 0..16 {
             db.insert(&key(n), &value(n, 30)).unwrap();
         }
@@ -442,7 +353,7 @@ fn segments_past_the_checkpoint_are_discarded() {
     let bucket = dir.path().join("store").join("b000");
 
     {
-        let db = DbRW::<32>::open(dir.path()).unwrap();
+        let db = DbRW::<32>::open_or_create(dir.path(), &Options::new()).unwrap();
         db.insert(&key(1), b"kept").unwrap();
     }
 
@@ -460,10 +371,7 @@ fn recovery_is_per_bucket() {
     let dir = tempfile::tempdir().unwrap();
 
     {
-        let db = Options::new()
-            .buckets([32, 64])
-            .open::<32>(dir.path())
-            .unwrap();
+        let db = DbRW::<32>::open_or_create(dir.path(), &Options::new().buckets([32, 64])).unwrap();
         db.insert(&key(1), &value(1, 32)).unwrap();
         db.insert(&key(2), &value(2, 64)).unwrap();
         db.insert(&key(3), &value(3, 7)).unwrap();
@@ -495,4 +403,169 @@ fn recovery_is_per_bucket() {
         let len = std::fs::metadata(path).unwrap().len();
         assert_eq!(len, [7 + 1, 32, 64][tag as usize] as u64);
     }
+}
+
+#[test]
+fn open_requires_an_existing_database() {
+    let dir = tempfile::tempdir().unwrap();
+    assert!(matches!(
+        DbRW::<32>::open(dir.path().join("nope")),
+        Err(Error::NotInitialized)
+    ));
+    assert!(matches!(
+        DbRO::<32>::open(dir.path().join("nope")),
+        Err(Error::NotInitialized)
+    ));
+
+    // An empty directory is not a database either.
+    assert!(matches!(
+        DbRW::<32>::open(dir.path()),
+        Err(Error::NotInitialized)
+    ));
+}
+
+#[test]
+fn open_reads_the_configuration_back_from_disk() {
+    let dir = tempfile::tempdir().unwrap();
+    drop(
+        DbRW::<32>::open_or_create(
+            dir.path(),
+            &Options::new().segment_size(4096).buckets([32, 64]),
+        )
+        .unwrap(),
+    );
+
+    let db = DbRW::<32>::open(dir.path()).unwrap();
+    assert_eq!(db.buckets(), &[32, 64]);
+    assert_eq!(db.segment_size(), 4096);
+    drop(db);
+
+    let db = DbRO::<32>::open(dir.path()).unwrap();
+    assert_eq!(db.buckets(), &[32, 64]);
+    assert_eq!(db.segment_size(), 4096);
+}
+
+#[test]
+fn open_or_create_creates_then_matches() {
+    let dir = tempfile::tempdir().unwrap();
+
+    {
+        let db = DbRW::<32>::open_or_create(dir.path(), &Options::new().buckets([32, 64])).unwrap();
+        assert_eq!(db.buckets(), &[32, 64]);
+        db.insert(&key(1), &value(1, 64)).unwrap();
+    }
+
+    // Order is not part of the assertion: it only fixes internal tags.
+    let db = DbRW::<32>::open_or_create(dir.path(), &Options::new().buckets([64, 32])).unwrap();
+    assert_eq!(db.buckets(), &[32, 64]);
+    assert_eq!(db.get(&key(1)).unwrap().unwrap(), value(1, 64));
+}
+
+#[test]
+fn open_or_create_rejects_bucket_mismatch() {
+    let dir = tempfile::tempdir().unwrap();
+    drop(DbRW::<32>::open_or_create(dir.path(), &Options::new().buckets([32, 64])).unwrap());
+
+    for requested in [vec![32usize], vec![32, 64, 96], vec![]] {
+        let err = DbRW::<32>::open_or_create(
+            dir.path(),
+            &Options::new().buckets(requested.iter().copied()),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&err, Error::BucketsMismatch { stored, requested: r }
+                if stored == &[32, 64] && r == &requested),
+            "unexpected error for {requested:?}: {err}"
+        );
+    }
+}
+
+#[test]
+fn open_or_create_rejects_key_length_mismatch() {
+    let dir = tempfile::tempdir().unwrap();
+    drop(DbRW::<32>::open_or_create(dir.path(), &Options::new()).unwrap());
+
+    assert!(matches!(
+        DbRW::<20>::open_or_create(dir.path(), &Options::new()),
+        Err(Error::KeyLenMismatch {
+            stored: 32,
+            requested: 20
+        })
+    ));
+}
+
+#[test]
+fn open_or_create_rejects_segment_size_mismatch() {
+    let dir = tempfile::tempdir().unwrap();
+    drop(DbRW::<32>::open_or_create(dir.path(), &Options::new().segment_size(4096)).unwrap());
+
+    // Leaving it unset asserts the default, so it mismatches just the same.
+    for options in [Options::new().segment_size(8192), Options::new()] {
+        assert!(matches!(
+            DbRW::<32>::open_or_create(dir.path(), &options),
+            Err(Error::SegmentSizeMismatch { stored: 4096, .. })
+        ));
+    }
+}
+
+#[test]
+fn read_only_open_or_create_bootstraps_a_missing_database() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("fresh");
+
+    // Only one MDBX environment per path per process, so each handle is
+    // dropped before the next is opened.
+    {
+        let reader = DbRO::<32>::open_or_create(&path, &Options::new().bucket(48)).unwrap();
+        assert_eq!(reader.buckets(), &[48]);
+        assert!(reader.is_empty().unwrap());
+    }
+
+    // The creation released the writer lock, so a real writer can take it.
+    {
+        let writer = DbRW::<32>::open(&path).unwrap();
+        writer.insert(&key(7), &value(7, 48)).unwrap();
+    }
+
+    let reader = DbRO::<32>::open(&path).unwrap();
+    assert_eq!(reader.get(&key(7)).unwrap().unwrap(), value(7, 48));
+}
+
+#[test]
+fn read_only_open_or_create_matches_an_existing_database() {
+    let dir = tempfile::tempdir().unwrap();
+    {
+        let writer = DbRW::<32>::open_or_create(dir.path(), &Options::new().bucket(48)).unwrap();
+        writer.insert(&key(7), &value(7, 48)).unwrap();
+    }
+
+    {
+        let reader = DbRO::<32>::open_or_create(dir.path(), &Options::new().bucket(48)).unwrap();
+        assert_eq!(reader.get(&key(7)).unwrap().unwrap(), value(7, 48));
+    }
+
+    assert!(matches!(
+        DbRO::<32>::open_or_create(dir.path(), &Options::new()),
+        Err(Error::BucketsMismatch { .. })
+    ));
+    assert!(matches!(
+        DbRO::<20>::open_or_create(dir.path(), &Options::new().bucket(48)),
+        Err(Error::KeyLenMismatch {
+            stored: 32,
+            requested: 20
+        })
+    ));
+}
+
+#[test]
+fn zero_sized_options_are_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    assert!(matches!(
+        DbRW::<32>::open_or_create(dir.path(), &Options::new().bucket(0)),
+        Err(Error::ZeroBucket)
+    ));
+    assert!(matches!(
+        DbRW::<32>::open_or_create(dir.path(), &Options::new().segment_size(0)),
+        Err(Error::ZeroSegmentSize)
+    ));
 }

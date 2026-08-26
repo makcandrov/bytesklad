@@ -13,7 +13,7 @@ use bytesklad::{DbRW, DbRead, DbWrite, Options};
 
 # fn main() -> Result<(), bytesklad::Error> {
 // 32-byte keys, with dedicated buckets for the two most common value lengths.
-let db = Options::new().buckets([32, 64]).open::<32>("./db")?;
+let db = DbRW::<32>::open_or_create("./db", &Options::new().buckets([32, 64]))?;
 
 db.insert(&[7u8; 32], b"hello")?;
 assert_eq!(db.get(&[7u8; 32])?.unwrap(), b"hello");
@@ -156,42 +156,43 @@ past the probe, in which case the remainder is fetched exactly.
 
 ---
 
-## Buckets are declared, not fixed
+## Buckets are fixed at creation
 
-Buckets are named in [`Options`], and the request is *make sure these exist*:
+Buckets are named in [`Options`], which describes the configuration a database
+is created with. `open_or_create` applies it to a path that has no database
+yet, and asserts it against one that does; `open` needs no configuration at all
+because it reads the whole thing back from disk:
 
 ```rust,no_run
 # fn main() -> Result<(), bytesklad::Error> {
-use bytesklad::{DbRW, Options};
+use bytesklad::{DbRO, DbRW, Options};
 
 // Creating: 32 and 64 get their own buckets.
-let db = Options::new().buckets([32, 64]).open::<32>("./db")?;
+let db = DbRW::<32>::open_or_create("./db", &Options::new().buckets([32, 64]))?;
 drop(db);
 
-// Reopening: buckets come back from the registry. Nothing to declare.
+// Reopening: the layout comes back from the registry. Nothing to declare.
 let db = DbRW::<32>::open("./db")?;
 assert_eq!(db.buckets(), &[32, 64]);
 drop(db);
 
-// Adding one later is allowed and cheap.
-let db = Options::new().bucket(128).open::<32>("./db")?;
-assert_eq!(db.buckets(), &[32, 64, 128]);
+// Asking for a different layout is an error, not a migration.
+assert!(DbRW::<32>::open_or_create("./db", &Options::new().bucket(128)).is_err());
+
+// Readers work the same way, and can create a database of their own.
+let db = DbRO::<32>::open("./db")?;
+assert_eq!(db.buckets(), &[32, 64]);
 # Ok(()) }
 ```
 
-Existing buckets are reused, new ones are appended, and none are ever removed —
-so declaring fewer than a database already has keeps what is there rather than
-discarding it. Readers do not declare buckets at all; [`DbRO`] recovers the
-entire layout from disk.
+Everything in the registry — the key length `K`, the segment size and the bucket
+record sizes — is fixed when the database is created, because stored pointers
+are decoded against it. Opening with a different value for any of them is an
+error rather than silent corruption. Bucket *order* is not compared: it only
+fixes internal tags.
 
-Adding a bucket needs no rewrite because **every record carries its own tag**.
-Values of length 128 written before the bucket existed keep pointing at the
-variable-length bucket and stay readable forever; only new ones land in the new
-bucket. Tags are assigned once and never reused or reordered.
-
-Two things *are* fixed at creation, because stored pointers are decoded against
-them: the key length `K`, and the segment size. Reopening with a different value
-for either is an error rather than silent corruption.
+Tags are assigned once and never reused or reordered, and **every record carries
+its own tag**, so a record always names the bucket it was written to.
 
 ---
 

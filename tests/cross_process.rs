@@ -63,7 +63,7 @@ fn reader_process_sees_writer_commits() {
 
     // The writer stays open for the whole test, exactly as a long-running
     // ingest process would.
-    let writer = DbRW::<32>::open(db).unwrap();
+    let writer = DbRW::<32>::open_or_create(db, &Options::new()).unwrap();
     writer.insert(&key(1), b"first").unwrap();
 
     let mut reader = spawn_reader("child_sees_writer_commits", db);
@@ -93,56 +93,12 @@ fn child_sees_writer_commits() {
 }
 
 #[test]
-fn reader_process_discovers_buckets_declared_after_it_opened() {
-    let dir = tempfile::tempdir().unwrap();
-    let db = dir.path();
-
-    {
-        let writer = DbRW::<32>::open(db).unwrap();
-        writer.insert(&key(1), &value(1, 32)).unwrap();
-    }
-
-    // The reader opens while the database still has no buckets at all.
-    let mut reader = spawn_reader("child_discovers_new_bucket", db);
-    await_signal(db, "reader-ready");
-
-    {
-        let writer = Options::new().bucket(32).open::<32>(db).unwrap();
-        writer.insert(&key(2), &value(2, 32)).unwrap();
-    }
-    signal(db, "go");
-
-    assert!(reader.wait().unwrap().success(), "reader process failed");
-}
-
-#[test]
-fn child_discovers_new_bucket() {
-    let Some(db) = assigned_db() else { return };
-
-    let reader = DbRO::<32>::open(&db).unwrap();
-    assert!(reader.buckets().is_empty());
-    assert_eq!(reader.get(&key(1)).unwrap().unwrap(), value(1, 32));
-
-    signal(&db, "reader-ready");
-    await_signal(&db, "go");
-
-    // Meeting an unknown bucket tag makes the reader reload the registry
-    // rather than fail.
-    assert_eq!(reader.get(&key(2)).unwrap().unwrap(), value(2, 32));
-    // The record written before the bucket existed stays where it was.
-    assert_eq!(reader.get(&key(1)).unwrap().unwrap(), value(1, 32));
-}
-
-#[test]
 fn reader_process_follows_segment_rollover() {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path();
 
-    let writer = Options::new()
-        .segment_size(1024)
-        .bucket(100)
-        .open::<32>(db)
-        .unwrap();
+    let writer =
+        DbRW::<32>::open_or_create(db, &Options::new().segment_size(1024).bucket(100)).unwrap();
     writer.insert(&key(0), &value(0, 100)).unwrap();
 
     let mut reader = spawn_reader("child_follows_segment_rollover", db);
@@ -179,7 +135,7 @@ fn many_reader_processes_at_once() {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path();
 
-    let writer = Options::new().buckets([32, 64]).open::<32>(db).unwrap();
+    let writer = DbRW::<32>::open_or_create(db, &Options::new().buckets([32, 64])).unwrap();
     for n in 0..200 {
         writer
             .insert(&key(n), &value(n, if n % 2 == 0 { 32 } else { 64 }))
@@ -216,4 +172,33 @@ fn child_reads_all() {
             );
         }
     }
+}
+
+#[test]
+fn reader_process_open_or_creates_against_a_locked_database() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path();
+
+    // The writer holds the exclusive lock for the whole test. The reader must
+    // still get through: the database exists, so nothing has to be created.
+    let writer = DbRW::<32>::open_or_create(db, &Options::new().bucket(48)).unwrap();
+    writer.insert(&key(1), &value(1, 48)).unwrap();
+
+    let mut reader = spawn_reader("child_open_or_creates_against_a_locked_database", db);
+    assert!(reader.wait().unwrap().success(), "reader process failed");
+}
+
+#[test]
+fn child_open_or_creates_against_a_locked_database() {
+    let Some(db) = assigned_db() else { return };
+
+    // One MDBX environment per path per process, so the mismatching attempt
+    // goes first and its handle is gone before the real one is opened.
+    assert!(matches!(
+        DbRO::<32>::open_or_create(&db, &Options::new()),
+        Err(bytesklad::Error::BucketsMismatch { .. })
+    ));
+
+    let reader = DbRO::<32>::open_or_create(&db, &Options::new().bucket(48)).unwrap();
+    assert_eq!(reader.get(&key(1)).unwrap().unwrap(), value(1, 48));
 }

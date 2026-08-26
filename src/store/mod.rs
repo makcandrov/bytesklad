@@ -44,37 +44,30 @@ pub(crate) struct Store {
 }
 
 impl Store {
-    pub fn open_writable(root: &Path, key_len: usize, options: &Options) -> Result<Self> {
+    /// Open an existing store for writing.
+    pub fn open_writable(root: &Path, key_len: usize) -> Result<Self> {
+        let dir = root.join("store");
+        let registry = load_registry(&dir, key_len)?;
+        Self::writable(dir, registry)
+    }
+
+    /// Create the store with `options`, or open the one already there and
+    /// require its configuration to be exactly the one `options` describes.
+    pub fn create_writable(root: &Path, key_len: usize, options: &Options) -> Result<Self> {
+        options.validate()?;
         let dir = root.join("store");
         std::fs::create_dir_all(&dir)?;
 
         let registry = match Registry::load(&dir)? {
-            Some(mut registry) => {
+            Some(registry) => {
                 check_key_len(&registry, key_len)?;
-                if let Some(requested) = options.segment_size
-                    && requested != registry.segment_size
-                {
-                    return Err(Error::SegmentSizeMismatch {
-                        stored: registry.segment_size,
-                        requested,
-                    });
-                }
-                // Declaring buckets on an existing database only ever adds:
-                // existing tags keep their meaning and records already written
-                // stay exactly where they are.
-                if registry.add_buckets(&options.buckets)? {
-                    registry.store(&dir)?;
-                }
+                check_config(registry.segment_size, &registry.buckets, options)?;
                 registry
             }
             None => {
-                let segment_size = options.segment_size.unwrap_or(DEFAULT_SEGMENT_SIZE);
-                if segment_size == 0 {
-                    return Err(Error::ZeroSegmentSize);
-                }
                 let mut registry = Registry {
                     key_len,
-                    segment_size,
+                    segment_size: options.segment_size,
                     buckets: Vec::new(),
                 };
                 registry.add_buckets(&options.buckets)?;
@@ -83,6 +76,10 @@ impl Store {
             }
         };
 
+        Self::writable(dir, registry)
+    }
+
+    fn writable(dir: PathBuf, registry: Registry) -> Result<Self> {
         let frontiers = checkpoint::load(&dir)?;
         let mut buckets = Vec::with_capacity(registry.buckets.len() + 1);
         for (tag, kind) in kinds(&registry) {
@@ -106,10 +103,10 @@ impl Store {
         })
     }
 
+    /// Open an existing store for reading.
     pub fn open_read_only(root: &Path, key_len: usize) -> Result<Self> {
         let dir = root.join("store");
-        let registry = Registry::load(&dir)?.ok_or(Error::NotInitialized)?;
-        check_key_len(&registry, key_len)?;
+        let registry = load_registry(&dir, key_len)?;
 
         Ok(Self {
             segment_size: registry.segment_size,
@@ -123,6 +120,11 @@ impl Store {
         })
     }
 
+    /// Fail unless this store's configuration is the one `options` describes.
+    pub fn check_config(&self, options: &Options) -> Result<()> {
+        options.validate()?;
+        check_config(self.segment_size, &self.bucket_sizes, options)
+    }
     pub fn segment_size(&self) -> u64 {
         self.segment_size
     }
@@ -197,6 +199,35 @@ impl Store {
             .cloned()
             .ok_or(Error::UnknownBucket(tag))
     }
+}
+
+fn load_registry(dir: &Path, key_len: usize) -> Result<Registry> {
+    let registry = Registry::load(dir)?.ok_or(Error::NotInitialized)?;
+    check_key_len(&registry, key_len)?;
+    Ok(registry)
+}
+
+/// Requires a stored configuration to be exactly the one `options` describes.
+/// Bucket order is not compared: it only fixes tags, which are internal.
+fn check_config(segment_size: u64, buckets: &[usize], options: &Options) -> Result<()> {
+    if options.segment_size != segment_size {
+        return Err(Error::SegmentSizeMismatch {
+            stored: segment_size,
+            requested: options.segment_size,
+        });
+    }
+
+    let mut stored = buckets.to_vec();
+    let mut requested = options.buckets.clone();
+    stored.sort_unstable();
+    requested.sort_unstable();
+    if stored != requested {
+        return Err(Error::BucketsMismatch {
+            stored: buckets.to_vec(),
+            requested: options.buckets.clone(),
+        });
+    }
+    Ok(())
 }
 
 fn check_key_len(registry: &Registry, key_len: usize) -> Result<()> {

@@ -24,6 +24,12 @@ pub enum Error {
     )]
     SegmentSizeMismatch { stored: u64, requested: u64 },
 
+    #[error("bucket mismatch: database has buckets {stored:?}, opened with {requested:?}")]
+    BucketsMismatch {
+        stored: Vec<usize>,
+        requested: Vec<usize>,
+    },
+
     #[error("a bucket record size must be greater than zero")]
     ZeroBucket,
 
