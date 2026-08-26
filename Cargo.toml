@@ -1,27 +1,29 @@
-[workspace]
-members = ["crates/*"]
-default-members = ["crates/preimages-db"]
-resolver = "3"
-
-[workspace.package]
+[package]
+name = "bytesklad"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.91"
-repository = "https://github.com/makcandrov/preimages-db"
-homepage = "https://github.com/makcandrov/preimages-db"
+repository = "https://github.com/makcandrov/bytesklad"
+homepage = "https://github.com/makcandrov/bytesklad"
 license = "MIT OR Apache-2.0"
+description = "Insert-only embedded database mapping fixed-size keys to variable-size byte values, ordered by key."
+keywords = ["database", "embedded", "key-value", "append-only", "storage"]
+categories = ["database-implementations"]
 
-[workspace.dependencies]
-preimages-db = { path = "crates/preimages-db" }
-flat-store = { path = "crates/flat-store" }
-
-hashbrown = "0.17"
-parking_lot = "0.12"
+[dependencies]
 libmdbx = "0.6"
+parking_lot = "0.12"
 thiserror = "2"
-tempfile = "3"
-tiny-keccak = { version = "2", features = ["keccak"] }
-libc = "0.2"
-windows-sys = "0.61"
 
-alloy-preimages = { git = "https://github.com/makcandrov/alloy-preimages" }
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Storage_FileSystem",
+    "Win32_Foundation",
+    "Win32_System_IO",
+] }
+
+[dev-dependencies]
+tempfile = "3"
