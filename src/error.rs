@@ -18,12 +18,6 @@ pub enum Error {
     #[error("key length mismatch: database was created with {stored}, opened with {requested}")]
     KeyLenMismatch { stored: usize, requested: usize },
 
-    #[error(
-        "segment size mismatch: database was created with {stored}, opened with {requested}; \
-         the segment size is baked into stored pointers and cannot be changed"
-    )]
-    SegmentSizeMismatch { stored: u64, requested: u64 },
-
     #[error("bucket mismatch: database has buckets {stored:?}, opened with {requested:?}")]
     BucketsMismatch {
         stored: Vec<usize>,
@@ -32,9 +26,6 @@ pub enum Error {
 
     #[error("a bucket record size must be greater than zero")]
     ZeroBucket,
-
-    #[error("segment size must be greater than zero")]
-    ZeroSegmentSize,
 
     #[error("too many buckets: at most {max} may be declared over the lifetime of a database")]
     TooManyBuckets { max: usize },

@@ -9,29 +9,25 @@ use std::{
 use parking_lot::{Mutex, RwLock};
 use rustc_hash::FxHashMap;
 
-use crate::{Error, Options, Result};
+use crate::{Error, Options, Result, sys};
 
 mod bucket;
 mod checkpoint;
+mod file;
 mod pointer;
 mod registry;
-mod segment;
 
 use bucket::{Bucket, Kind};
 pub(crate) use pointer::Pointer;
-use pointer::{MAX_OFFSET, UNSIZED_TAG};
+use pointer::{EMPTY_TAG, MAX_OFFSET, UNSIZED_TAG};
 use registry::Registry;
 
-/// Default cap on the size of a single segment file.
-pub const DEFAULT_SEGMENT_SIZE: u64 = 4 * 1024 * 1024 * 1024;
-
-/// The byte store: every value ever inserted, laid out in buckets of segments.
+/// The byte store: every value ever inserted, laid out one file per bucket.
 #[derive(Debug)]
 pub(crate) struct Store {
     dir: PathBuf,
-    segment_size: u64,
-    /// Buckets indexed by tag. Only ever appended to, so a tag always refers
-    /// to the same bucket for the life of the database.
+    /// Buckets indexed by [`slot`]. Only ever appended to, so a tag always
+    /// refers to the same bucket for the life of the database.
     buckets: RwLock<Vec<Arc<Bucket>>>,
     /// Record length to bucket tag, for routing writes.
     routing: FxHashMap<usize, u8>,
@@ -61,13 +57,12 @@ impl Store {
         let registry = match Registry::load(&dir)? {
             Some(registry) => {
                 check_key_len(&registry, key_len)?;
-                check_config(registry.segment_size, &registry.buckets, options)?;
+                check_config(&registry.buckets, options)?;
                 registry
             }
             None => {
                 let mut registry = Registry {
                     key_len,
-                    segment_size: options.segment_size,
                     buckets: Vec::new(),
                 };
                 registry.add_buckets(&options.buckets)?;
@@ -84,16 +79,17 @@ impl Store {
         let mut buckets = Vec::with_capacity(registry.buckets.len() + 1);
         for (tag, kind) in kinds(&registry) {
             buckets.push(Arc::new(Bucket::open_writable(
-                bucket_dir(&dir, tag),
+                bucket_path(&dir, kind),
                 kind,
-                registry.segment_size,
                 frontiers.get(&tag).copied(),
             )?));
         }
+        // The bucket files may have just been created; make their directory
+        // entries durable before anything is written into them.
+        sys::sync_dir(&dir)?;
 
         Ok(Self {
             dir,
-            segment_size: registry.segment_size,
             routing: routing(&registry),
             bucket_sizes: registry.buckets,
             buckets: RwLock::new(buckets),
@@ -109,7 +105,6 @@ impl Store {
         let registry = load_registry(&dir, key_len)?;
 
         Ok(Self {
-            segment_size: registry.segment_size,
             buckets: RwLock::new(read_only_buckets(&dir, &registry)),
             routing: routing(&registry),
             bucket_sizes: registry.buckets,
@@ -123,10 +118,7 @@ impl Store {
     /// Fail unless this store's configuration is the one `options` describes.
     pub fn check_config(&self, options: &Options) -> Result<()> {
         options.validate()?;
-        check_config(self.segment_size, &self.bucket_sizes, options)
-    }
-    pub fn segment_size(&self) -> u64 {
-        self.segment_size
+        check_config(&self.bucket_sizes, options)
     }
 
     pub fn bucket_sizes(&self) -> &[usize] {
@@ -134,10 +126,18 @@ impl Store {
     }
 
     pub fn read(&self, pointer: Pointer) -> Result<Vec<u8>> {
+        if pointer.tag() == EMPTY_TAG {
+            return Ok(Vec::new());
+        }
         self.bucket(pointer.tag())?.read(pointer.offset())
     }
 
     pub fn append(&self, value: &[u8]) -> Result<Pointer> {
+        // The empty value lives entirely in its tag: no bytes are written, so
+        // the store stays clean and nothing needs to be fsynced for it.
+        if value.is_empty() {
+            return Ok(Pointer::EMPTY);
+        }
         let tag = self
             .routing
             .get(&value.len())
@@ -151,7 +151,7 @@ impl Store {
     /// Make every appended byte durable and publish the new frontier.
     ///
     /// Returns without touching the disk when nothing has been appended since
-    /// the last call, and otherwise fsyncs only the segments actually written.
+    /// the last call, and otherwise fsyncs only the buckets actually written.
     pub fn sync(&self) -> Result<()> {
         // The lock is taken before the flag is cleared so a caller that
         // appended and then called `sync` can never be told "already clean" by
@@ -171,15 +171,15 @@ impl Store {
     fn sync_inner(&self) -> Result<()> {
         let buckets = self.buckets.read().clone();
         let mut frontiers = Vec::with_capacity(buckets.len());
-        for (tag, bucket) in buckets.iter().enumerate() {
-            let (segment, len) = bucket.sync()?;
-            frontiers.push((tag as u8, segment, len));
+        for (slot, bucket) in buckets.iter().enumerate() {
+            frontiers.push((tag_of(slot), bucket.sync()?));
         }
         checkpoint::store(&self.dir, &frontiers)
     }
 
     fn bucket(&self, tag: u8) -> Result<Arc<Bucket>> {
-        if let Some(bucket) = self.buckets.read().get(usize::from(tag)) {
+        let slot = slot(tag);
+        if let Some(bucket) = self.buckets.read().get(slot) {
             return Ok(bucket.clone());
         }
         if self.writable {
@@ -190,14 +190,11 @@ impl Store {
         // meet its tag here. Re-read the registry rather than fail: buckets
         // are append-only, so reloading can only ever add entries.
         let mut guard = self.buckets.write();
-        if guard.len() <= usize::from(tag) {
+        if guard.len() <= slot {
             let registry = Registry::load(&self.dir)?.ok_or(Error::NotInitialized)?;
             *guard = read_only_buckets(&self.dir, &registry);
         }
-        guard
-            .get(usize::from(tag))
-            .cloned()
-            .ok_or(Error::UnknownBucket(tag))
+        guard.get(slot).cloned().ok_or(Error::UnknownBucket(tag))
     }
 }
 
@@ -208,19 +205,15 @@ fn load_registry(dir: &Path, key_len: usize) -> Result<Registry> {
 }
 
 /// Requires a stored configuration to be exactly the one `options` describes.
-/// Bucket order is not compared: it only fixes tags, which are internal.
-fn check_config(segment_size: u64, buckets: &[usize], options: &Options) -> Result<()> {
-    if options.segment_size != segment_size {
-        return Err(Error::SegmentSizeMismatch {
-            stored: segment_size,
-            requested: options.segment_size,
-        });
-    }
-
+/// Bucket order is not compared: it only fixes tags, which are internal. Nor
+/// are repeats, which `Options::buckets` being a public field allows and which
+/// declare a single bucket just the same.
+fn check_config(buckets: &[usize], options: &Options) -> Result<()> {
     let mut stored = buckets.to_vec();
     let mut requested = options.buckets.clone();
     stored.sort_unstable();
     requested.sort_unstable();
+    requested.dedup();
     if stored != requested {
         return Err(Error::BucketsMismatch {
             stored: buckets.to_vec(),
@@ -240,7 +233,26 @@ fn check_key_len(registry: &Registry, key_len: usize) -> Result<()> {
     Ok(())
 }
 
-/// Tag 0 is the variable-length bucket; tag `i + 1` holds records of
+/// Position of `tag`'s bucket in `Store::buckets`, which holds the
+/// variable-length bucket first and then the size buckets in tag order. Tags
+/// are not usable as indices directly: the variable-length one is `255`, and
+/// `EMPTY_TAG` has no bucket at all and never reaches here.
+fn slot(tag: u8) -> usize {
+    match tag {
+        UNSIZED_TAG => 0,
+        tag => usize::from(tag),
+    }
+}
+
+/// Inverse of [`slot`].
+fn tag_of(slot: usize) -> u8 {
+    match slot {
+        0 => UNSIZED_TAG,
+        slot => slot as u8,
+    }
+}
+
+/// Tag `255` is the variable-length bucket; tag `i + 1` holds records of
 /// `registry.buckets[i]` bytes.
 fn kinds(registry: &Registry) -> Vec<(u8, Kind)> {
     std::iter::once((UNSIZED_TAG, Kind::Unsized))
@@ -266,16 +278,16 @@ fn routing(registry: &Registry) -> FxHashMap<usize, u8> {
 fn read_only_buckets(dir: &Path, registry: &Registry) -> Vec<Arc<Bucket>> {
     kinds(registry)
         .into_iter()
-        .map(|(tag, kind)| {
-            Arc::new(Bucket::open_read_only(
-                bucket_dir(dir, tag),
-                kind,
-                registry.segment_size,
-            ))
-        })
+        .map(|(_, kind)| Arc::new(Bucket::open_read_only(bucket_path(dir, kind), kind)))
         .collect()
 }
 
-fn bucket_dir(dir: &Path, tag: u8) -> PathBuf {
-    dir.join(format!("b{tag:03}"))
+/// A bucket's file is named after what it holds rather than after its tag: the
+/// record size is the stable, meaningful half of the identity, and tags are
+/// internal. Sizes are zero-padded so a listing comes out in size order.
+fn bucket_path(dir: &Path, kind: Kind) -> PathBuf {
+    match kind {
+        Kind::Unsized => dir.join("unsized.bucket"),
+        Kind::Sized(size) => dir.join(format!("sized-{size:010}.bucket")),
+    }
 }

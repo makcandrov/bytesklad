@@ -36,52 +36,46 @@ A database is two layers, and every lookup crosses both:
                   │ pointer
                   ▼
   ┌───────────────────────────────┐
-  │  store — append-only segments │   pointer ──► the bytes
+  │  store — append-only buckets  │   pointer ──► the bytes
   └───────────────────────────────┘
 ```
 
 The index answers *where is it*, the store answers *what is it*. The index is
-the expensive layer: at these sizes it holds billions of entries and is hit
-randomly on every lookup, whereas the store is written once and read once per
-lookup. So the design spends bytes in the store to save bytes in the index.
+the expensive layer — billions of entries, hit randomly on every lookup, while
+the store is written once and read once — so the design spends bytes in the
+store to save bytes in the index.
 
 ### The pointer is the whole index value
-
-Everything the store needs to find and bound a record is packed into eight
-bytes:
 
 ```txt
    63          56 55                                                   0
   ┌──────────────┬──────────────────────────────────────────────────────┐
-  │   tag (8)    │                  logical offset (56)                 │
+  │   tag (8)    │                      offset (56)                     │
   └──────────────┴──────────────────────────────────────────────────────┘
-     which bucket              where in that bucket's address space
+     which bucket                  where in that bucket's file
 ```
 
-There is no length field. That is the point of the whole layout: the length is
-either implied by the tag or stored alongside the bytes, never in the index.
-
-An MDBX leaf entry costs roughly `key + value + 10` bytes of node overhead, so
-for 32-byte keys an 8-byte value is about 50 bytes against 54 for a 12-byte
-one — some 7% off the layer that dominates both disk footprint and random-read
-cost.
+There is no length field: the length is either implied by the tag or stored
+alongside the bytes. An MDBX leaf entry costs about `key + value + 10` bytes, so
+under 32-byte keys an 8-byte value is ~50 bytes against 54 for a 12-byte one —
+7% off the layer that dominates both disk footprint and random-read cost.
 
 ### Buckets
 
-A **bucket** is a group of records that are routed and framed the same way.
-There are two kinds.
+A **bucket** is a group of records routed and framed the same way. Each is one
+file, appended to and never rewritten, and a record's 56-bit offset is its byte
+offset in that file — so a read is one positioned `pread` at the offset the
+index handed back, with no table in between.
 
-**The variable-length bucket** (tag `0`) always exists and takes anything that
-does not match a size bucket. Each record is framed with its own length:
+**The variable-length bucket** (tag `255`) always exists and takes anything that
+does not match a size bucket. Each record carries its own length, LEB128-encoded:
+one byte under 128, two under 16 KiB.
 
 ```txt
    [varint length][payload][varint length][payload][varint length][payload]
 ```
 
-The prefix is LEB128, so it costs **one byte** for payloads under 128 bytes and
-two under 16 KiB.
-
-**Size buckets** (tags `1..=255`) are declared by you, each pinned to one exact
+**Size buckets** (tags `1..=254`) are declared by you, each pinned to one exact
 record length. Their records carry no framing at all, because the bucket *is*
 the length:
 
@@ -89,57 +83,43 @@ the length:
    [payload][payload][payload][payload][payload][payload][payload][payload]
 ```
 
-Declaring a bucket for 32 therefore does three things: it drops the framing
-byte, it makes reads a single positioned read of a known size with nothing to
-parse, and it packs records at an exact stride — 128 of them per 4 KiB page,
-none straddling a page boundary.
+Declaring a bucket for 32 therefore drops the framing byte, makes a read a
+single positioned read of a known size with nothing to parse, and packs records
+at an exact stride — 128 per 4 KiB page, none straddling a page boundary.
 
-This pays off in proportion to how many records share the length, which is why
-buckets are opt-in and few. Value lengths are usually Zipf-shaped: a handful of
-lengths cover almost everything, then a long flat tail. Two to eight buckets
-captures nearly all the benefit, and the tail belongs in the variable-length
-bucket, where it costs one byte each rather than a directory and a file each.
+**The empty value** (tag `0`) never reaches a bucket at all: it has nothing to
+store, so its tag alone reconstructs it. Reading one costs no file access, and
+inserting one leaves the store clean, with nothing to fsync.
 
-### Segments
-
-Within a bucket, bytes go into **segment files** of a bounded size (4 GiB by
-default). The newest one is being appended to; every earlier one is *sealed* —
-complete, immutable, and never opened for writing again.
-
-A bucket's 56-bit logical offset is read as:
-
-```txt
-   segment index = offset / segment_size
-   offset inside = offset % segment_size
-```
-
-A record never straddles a segment boundary. When one would not fit, the
-current segment is sealed early and the record starts the next one, leaving a
-tail gap of less than one record. A record larger than an entire segment simply
-gets a segment to itself.
-
-Sealing buys operational properties that a single unbounded file cannot offer:
-sealed segments can be checksummed once, backed up incrementally, copied in
-parallel, compressed offline, or moved to colder storage, and corruption is
-confined to one file rather than the whole data set.
+Buckets pay off in proportion to how many records share the length, so they are
+opt-in and few. Value lengths are usually Zipf-shaped — a handful of lengths
+cover almost everything, then a long flat tail. Two to eight buckets captures
+nearly all the benefit; the tail belongs in the variable-length bucket, where it
+costs one byte each rather than a file each.
 
 ### On disk
 
+Bucket files are named after what they hold rather than after their tag, since
+the record size is the stable half of a bucket's identity. Sizes are zero-padded
+so a listing comes out in size order.
+
 ```txt
 <path>/
-├── LOCK                       # writer exclusion, held for the session
-├── index/                     # MDBX environment: key -> 8-byte pointer
+├── LOCK                          # writer exclusion, held for the session
+├── index/                        # MDBX environment: key -> 8-byte pointer
 └── store/
-    ├── registry               # key length, segment size, bucket table
-    ├── checkpoint             # per-bucket durable write frontier
-    ├── b000/                  # tag 0 — variable-length, [varint len][payload]
-    │   ├── 0000000000.seg     # sealed
-    │   └── 0000000001.seg     # active
-    ├── b001/                  # tag 1 — first declared size bucket
-    │   └── 0000000000.seg
-    └── b002/                  # tag 2 — second declared size bucket
-        └── 0000000000.seg
+    ├── registry                  # key length and bucket table
+    ├── checkpoint                # per-bucket durable write frontier
+    ├── sized-0000000032.bucket   # tag 1 — first declared size bucket
+    ├── sized-0000000064.bucket   # tag 2 — second declared size bucket
+    └── unsized.bucket            # tag 255 — [varint len][payload]
 ```
+
+One large append-only file does not degrade: `fdatasync` costs what you wrote
+since the last flush rather than what the file weighs, ext4 extent trees stay
+shallow at these sizes, and random `pread` latency is flat in file length. The
+ceiling is the filesystem's own maximum file size — 16 TiB on ext4, 8 EiB on
+XFS — under the pointer's 64 PiB per bucket.
 
 ### A read, end to end
 
@@ -147,21 +127,19 @@ For `get(key)` on a database with buckets `[32, 64]`:
 
 1. Look `key` up in the index. Say it yields tag `1`, offset `8_589_935_000`.
 2. Tag `1` is the 32-byte bucket, so the record is 32 bytes with no framing.
-3. With a 4 GiB segment size: segment `1`, at offset `1_432` inside it.
-4. Read exactly 32 bytes at 1 432 in `store/b001/0000000001.seg`. Done.
+3. Read exactly 32 bytes at that offset in `store/sized-0000000032.bucket`.
 
-Had the tag been `0`, step 4 would instead speculatively read 512 bytes, decode
-the length prefix, and return the payload — one syscall unless the value runs
-past the probe, in which case the remainder is fetched exactly.
+Under tag `255`, step 3 speculatively reads 512 bytes and decodes the length
+prefix instead — still one syscall, unless the value runs past the probe, in
+which case the remainder is fetched exactly. Under tag `0` there is no step 3.
 
 ---
 
-## Buckets are fixed at creation
+## Configuration is fixed at creation
 
-Buckets are named in [`Options`], which describes the configuration a database
-is created with. `open_or_create` applies it to a path that has no database
-yet, and asserts it against one that does; `open` needs no configuration at all
-because it reads the whole thing back from disk:
+Buckets are named in [`Options`]. `open_or_create` applies it to a path with no
+database yet and asserts it against one that has it; `open` takes no
+configuration at all, reading it back from the registry:
 
 ```rust,no_run
 # fn main() -> Result<(), bytesklad::Error> {
@@ -185,14 +163,14 @@ assert_eq!(db.buckets(), &[32, 64]);
 # Ok(()) }
 ```
 
-Everything in the registry — the key length `K`, the segment size and the bucket
-record sizes — is fixed when the database is created, because stored pointers
-are decoded against it. Opening with a different value for any of them is an
-error rather than silent corruption. Bucket *order* is not compared: it only
-fixes internal tags.
+The key length `K` and the bucket sizes are fixed at creation because stored
+pointers are decoded against them; opening with different ones is an error, not
+silent corruption. Bucket *order* is not compared — it only fixes tags, which
+are assigned once and never reused, and every record carries its own tag.
 
-Tags are assigned once and never reused or reordered, and **every record carries
-its own tag**, so a record always names the bucket it was written to.
+The index map size is the exception: reserved address space rather than disk, it
+is not stored, defaults to 4 TiB, and is raised with `Options::index_map_size`.
+Expect the index to rival the data it indexes when values are small.
 
 ---
 
@@ -200,74 +178,41 @@ its own tag**, so a record always names the bucket it was written to.
 
 Every batch is made durable in a fixed order:
 
-1. **fsync the store** — flush the segments that were actually appended to.
-2. **Publish the checkpoint** — write each bucket's `(active segment, length)`
-   frontier via write-temp, fsync, rename, fsync-directory, so a reader only
-   ever sees the complete previous or complete next version.
+1. **fsync the store** — only the buckets actually appended to.
+2. **Publish the checkpoint** — each bucket's durable length, written via
+   temp-file, fsync, rename, fsync-directory, so a reader sees the complete
+   previous or the complete next version and nothing in between.
 3. **Commit the index**, then flush it.
 
-The index therefore never becomes durable before the bytes it names. The
-opposite can happen — bytes in the store with no index entry — and is harmless:
-they are simply never read. Almost all of them sit past the checkpointed
-frontier and are truncated when a writer next opens the database; only a failure
-in the narrow window between step 2 and step 3 leaks them permanently, costing
-disk and nothing else.
+So the index never becomes durable before the bytes it names. The opposite —
+bytes with no index entry — is harmless: they are never read, and a writer
+truncates each bucket back to the checkpointed frontier when it next opens the
+database. Only a crash in the window between steps 2 and 3 leaks them for good,
+costing disk and nothing else.
 
-On open, a writer discards everything past each bucket's frontier: whole
-segments beyond it, and the tail of the segment holding it. A bucket missing
-from the checkpoint was never synced, so nothing committed can reference it and
-it recovers to empty.
-
-**Flushing is proportional to what you wrote, not to what you opened.** Each
-segment tracks whether it has unflushed bytes, so a database with eight buckets
-that received one 32-byte insert issues one fsync, not nine — and a sync with
-nothing pending touches the disk not at all.
-
-Prefer `insert_batch` for bulk ingest: it flushes once for the entire batch,
-while `insert` flushes per call.
+**Flushing is proportional to what you wrote, not to what you opened**: eight
+buckets and one 32-byte insert is one fsync, not nine, and a sync with nothing
+pending touches the disk not at all. Prefer `insert_batch` for bulk ingest — it
+flushes once per batch, where `insert` flushes once per call.
 
 ---
 
 ## Concurrency
 
-**One writer, many readers, across processes.** The writer takes an advisory
+**One writer, many readers, across processes.** The writer holds an advisory
 lock on `LOCK` for its session, released by the OS if the process dies; a second
 [`DbRW`] anywhere on the machine fails with `Error::Locked`. Any number of
-[`DbRO`] handles in other processes read concurrently with it, and see every
-entry it has committed.
-
-Readers hold nothing stale. Bucket directories and segment files are opened
-lazily and cached on first use, so a reader started before a segment rolled over
-picks up the new file, and one that meets a bucket tag it has never seen reloads
-the registry instead of failing.
+[`DbRO`] handles in other processes read alongside it and see everything it has
+committed. Readers hold nothing stale: bucket files are opened once, on first
+use, and every read is positioned, so a reader sees whatever has been appended
+since — and one that meets an unknown tag reloads the registry rather than
+failing.
 
 Within a single process, share one handle rather than opening a second. [`DbRW`]
-is `Send + Sync` and implements [`DbRead`], so it serves reads and writes from
-any number of threads at once — inserts serialize only per bucket, and reads
-never block. Opening a [`DbRO`] on a path this same process already has open for
+is `Send + Sync` and implements [`DbRead`], serving reads and writes from any
+number of threads at once — inserts serialize only per bucket, and reads never
+block. Opening a [`DbRO`] on a path this same process already has open for
 writing fails, because MDBX permits one environment handle per process.
-
----
-
-## Sizing
-
-**Segment size** trades file count against granularity. 4 GiB is the default,
-so 1 TiB of data comes to roughly 256 segment files across all buckets, and
-10 TiB to 2 560 — worth checking against your `nofile` limit. Smaller segments give finer
-backup and replication units and more open descriptors — a reader keeps one per
-segment it has touched — while larger ones give fewer, bigger files. Pick it so
-the file count stays comfortable at your projected size, and remember it cannot
-be changed later.
-
-**Buckets** are worth declaring for a length that covers a meaningful share of
-your records, and not otherwise. Measure first; the migration is free, so there
-is no need to guess up front.
-
-**Index map size** defaults to 4 TiB of reserved address space, not disk. Raise
-it with `Options::index_map_size` if the index may grow past that. Note that the
-index is often comparable in size to the data it indexes when values are small:
-32-byte keys pointing at 32-byte values spend more disk on the index than on the
-values.
 
 ---
 
@@ -277,8 +222,8 @@ values.
 |---|---|
 | Key length | fixed at creation, any `K` |
 | Value length | 0 bytes to 64 PiB, though the index caps practical sizes far below that |
-| Size buckets | 255 over the lifetime of a database |
-| Bucket capacity | 64 PiB of logical address space each |
+| Size buckets | 254 over the lifetime of a database |
+| Bucket capacity | 64 PiB of address space each, or the filesystem's maximum file size if that is lower |
 | Writers | one per database, process-wide exclusion |
 | Readers | unbounded, in other processes |
 | Target | 64-bit; developed against Linux, and tested on Windows |

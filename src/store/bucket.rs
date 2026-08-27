@@ -1,24 +1,22 @@
 use std::{
-    fs::{self, OpenOptions},
+    fs::OpenOptions,
+    io,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::OnceLock,
 };
 
-use parking_lot::{Mutex, RwLock};
-use rustc_hash::FxHashMap;
+use parking_lot::Mutex;
 
 use crate::{
     Error, Result,
-    store::segment::{SegmentReader, SegmentWriter},
-    sys, varint,
+    store::file::{Reader, Writer},
+    varint,
 };
 
 /// Bytes read on the first, speculative read of a variable-length record.
 /// Sized so that the length prefix and the payload of a typical small record
 /// arrive in a single syscall; the kernel reads a whole page either way.
 const PROBE_LEN: usize = 512;
-
-const SEGMENT_EXT: &str = "seg";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Kind {
@@ -28,200 +26,130 @@ pub(crate) enum Kind {
     Unsized,
 }
 
-#[derive(Debug)]
-struct Active {
-    id: u32,
-    writer: SegmentWriter,
-}
-
-/// One bucket: a directory of append-only segment files holding records that
-/// are all routed the same way.
+/// One bucket: a single append-only file holding every record routed to it.
 ///
-/// A bucket's logical address space is `segment_index * segment_size + offset
-/// within segment`, so a single 56-bit offset locates a record in it. Records
-/// never straddle a segment boundary; the unused tail left behind when one is
-/// sealed early is at most one record long.
+/// A record's address within the bucket is simply its byte offset in that
+/// file, which is what the low 56 bits of a `Pointer` carry.
 #[derive(Debug)]
 pub(crate) struct Bucket {
     kind: Kind,
-    segment_size: u64,
-    dir: PathBuf,
-    /// Segment readers are opened on demand and cached, so a reader process
-    /// picks up segments the writer created after the reader started.
-    readers: RwLock<FxHashMap<u32, Arc<SegmentReader>>>,
+    path: PathBuf,
+    /// Opened on first read rather than up front, because a reader can open a
+    /// database in the window where the registry already names a bucket whose
+    /// file the writer has not created yet.
+    reader: OnceLock<Reader>,
     /// `Some` only for the writer; the mutex makes concurrent inserts on one
     /// bucket safe within the writing process.
-    active: Option<Mutex<Active>>,
+    active: Option<Mutex<Writer>>,
 }
 
 impl Bucket {
-    pub fn open_read_only(dir: PathBuf, kind: Kind, segment_size: u64) -> Self {
+    pub fn open_read_only(path: PathBuf, kind: Kind) -> Self {
         Self {
             kind,
-            segment_size,
-            dir,
-            readers: RwLock::new(FxHashMap::default()),
+            path,
+            reader: OnceLock::new(),
             active: None,
         }
     }
 
-    pub fn open_writable(
-        dir: PathBuf,
-        kind: Kind,
-        segment_size: u64,
-        frontier: Option<(u32, u64)>,
-    ) -> Result<Self> {
-        fs::create_dir_all(&dir)?;
-
+    pub fn open_writable(path: PathBuf, kind: Kind, frontier: Option<u64>) -> Result<Self> {
         // Absent from the checkpoint means nothing in this bucket was ever
         // made durable, and therefore nothing committed to the index can
         // reference it: recovering to the very start is safe.
-        let (segment, len) = frontier.unwrap_or((0, 0));
-        recover(&dir, segment, len)?;
+        recover(&path, frontier.unwrap_or(0))?;
 
-        let writer = SegmentWriter::open(&segment_path(&dir, segment))?;
-        sys::sync_dir(&dir)?;
-
+        let writer = Writer::open(&path)?;
         Ok(Self {
             kind,
-            segment_size,
-            dir,
-            readers: RwLock::new(FxHashMap::default()),
-            active: Some(Mutex::new(Active {
-                id: segment,
-                writer,
-            })),
+            path,
+            reader: OnceLock::new(),
+            active: Some(Mutex::new(writer)),
         })
     }
 
     pub fn read(&self, offset: u64) -> Result<Vec<u8>> {
-        let id = (offset / self.segment_size) as u32;
-        let intra = offset % self.segment_size;
-        let segment = self.segment(id)?;
+        let reader = self.reader()?;
 
         match self.kind {
             Kind::Sized(len) => {
                 let mut buf = vec![0u8; len];
-                segment.read_exact_at(&mut buf, intra)?;
+                reader.read_exact_at(&mut buf, offset)?;
                 Ok(buf)
             }
             Kind::Unsized => {
                 let mut probe = [0u8; PROBE_LEN];
-                let got = segment.read_at(&mut probe, intra)?;
+                let got = reader.read_at(&mut probe, offset)?;
 
                 let (len, header_len) = varint::decode(&probe[..got])
-                    .ok_or_else(|| Error::corrupt("segment", "unreadable length prefix"))?;
+                    .ok_or_else(|| Error::corrupt("bucket", "unreadable length prefix"))?;
                 let len = usize::try_from(len)
-                    .map_err(|_| Error::corrupt("segment", "length prefix out of range"))?;
+                    .map_err(|_| Error::corrupt("bucket", "length prefix out of range"))?;
 
                 let mut buf = vec![0u8; len];
                 let inline = (got - header_len).min(len);
                 buf[..inline].copy_from_slice(&probe[header_len..header_len + inline]);
                 if inline < len {
                     // Payload ran past the probe; fetch the remainder exactly.
-                    segment
-                        .read_exact_at(&mut buf[inline..], intra + (header_len + inline) as u64)?;
+                    reader
+                        .read_exact_at(&mut buf[inline..], offset + (header_len + inline) as u64)?;
                 }
                 Ok(buf)
             }
         }
     }
 
-    /// Append `data` and return its logical offset within this bucket.
+    /// Append `data` and return its offset within this bucket.
     pub fn append(&self, data: &[u8]) -> Result<u64> {
         let active = self
             .active
             .as_ref()
             .expect("append on a read-only bucket is unreachable");
-        let mut guard = active.lock();
+        let mut writer = active.lock();
 
-        let mut header = [0u8; varint::MAX_ENCODED_LEN];
-        let header_len = match self.kind {
-            Kind::Sized(_) => 0,
-            Kind::Unsized => varint::encode(data.len() as u64, &mut header),
-        };
-        let record_len = (header_len + data.len()) as u64;
-
-        if guard.writer.len() > 0 && guard.writer.len() + record_len > self.segment_size {
-            // Seal before rolling: once the checkpoint advances past this
-            // segment nothing will ever fsync it again, so it must be durable
-            // now. A record wider than a whole segment gets one to itself.
-            guard.writer.sync()?;
-            let id = guard.id + 1;
-            guard.writer = SegmentWriter::open(&segment_path(&self.dir, id))?;
-            guard.id = id;
-            sys::sync_dir(&self.dir)?;
+        let offset = writer.len();
+        if let Kind::Unsized = self.kind {
+            let mut header = [0u8; varint::MAX_ENCODED_LEN];
+            let header_len = varint::encode(data.len() as u64, &mut header);
+            writer.append(&header[..header_len])?;
         }
+        writer.append(data)?;
 
-        let intra = guard.writer.len();
-        if header_len > 0 {
-            guard.writer.append(&header[..header_len])?;
-        }
-        guard.writer.append(data)?;
-
-        Ok(u64::from(guard.id) * self.segment_size + intra)
+        Ok(offset)
     }
 
     /// Flush this bucket and report its durable frontier. Cheap when nothing
     /// was appended since the last call: no fsync is issued.
-    pub fn sync(&self) -> Result<(u32, u64)> {
+    pub fn sync(&self) -> Result<u64> {
         let active = self
             .active
             .as_ref()
             .expect("sync on a read-only bucket is unreachable");
-        let mut guard = active.lock();
-        let len = guard.writer.sync()?;
-        Ok((guard.id, len))
+        let mut writer = active.lock();
+        Ok(writer.sync()?)
     }
 
-    fn segment(&self, id: u32) -> Result<Arc<SegmentReader>> {
-        if let Some(reader) = self.readers.read().get(&id) {
-            return Ok(reader.clone());
+    fn reader(&self) -> Result<&Reader> {
+        if let Some(reader) = self.reader.get() {
+            return Ok(reader);
         }
-        let mut guard = self.readers.write();
-        if let Some(reader) = guard.get(&id) {
-            return Ok(reader.clone());
-        }
-        let reader = Arc::new(SegmentReader::open(&segment_path(&self.dir, id))?);
-        guard.insert(id, reader.clone());
-        Ok(reader)
+        let reader = Reader::open(&self.path)?;
+        // A racing thread may have won; either handle reads the same bytes.
+        Ok(self.reader.get_or_init(|| reader))
     }
 }
 
-fn segment_path(dir: &Path, id: u32) -> PathBuf {
-    dir.join(format!("{id:010}.{SEGMENT_EXT}"))
-}
+/// Discard everything written past the durable frontier.
+fn recover(path: &Path, len: u64) -> Result<()> {
+    let file = match OpenOptions::new().write(true).open(path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e.into()),
+    };
 
-fn segment_id(path: &Path) -> Option<u32> {
-    if path.extension()?.to_str()? != SEGMENT_EXT {
-        return None;
+    if file.metadata()?.len() > len {
+        file.set_len(len)?;
+        file.sync_all()?;
     }
-    path.file_stem()?.to_str()?.parse().ok()
-}
-
-/// Discard everything written past the durable frontier: whole segments beyond
-/// it, and the tail of the segment holding it.
-fn recover(dir: &Path, segment: u32, len: u64) -> Result<()> {
-    let mut stale = Vec::new();
-    for entry in fs::read_dir(dir)? {
-        let path = entry?.path();
-        if segment_id(&path).is_some_and(|id| id > segment) {
-            stale.push(path);
-        }
-    }
-    for path in stale {
-        fs::remove_file(path)?;
-    }
-
-    let active = segment_path(dir, segment);
-    if active.try_exists()? {
-        let file = OpenOptions::new().write(true).open(&active)?;
-        if file.metadata()?.len() > len {
-            file.set_len(len)?;
-            file.sync_all()?;
-        }
-    }
-
-    sys::sync_dir(dir)?;
     Ok(())
 }

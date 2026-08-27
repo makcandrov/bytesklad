@@ -12,16 +12,16 @@ fn value(n: u64, len: usize) -> Vec<u8> {
     (0..len).map(|i| (n as u8).wrapping_add(i as u8)).collect()
 }
 
-fn count_segments(root: &std::path::Path, tag: u8) -> usize {
-    let dir = root.join("store").join(format!("b{tag:03}"));
-    std::fs::read_dir(dir)
-        .map(|entries| {
-            entries
-                .filter_map(|e| e.ok())
-                .filter(|e| e.path().extension().is_some_and(|ext| ext == "seg"))
-                .count()
-        })
-        .unwrap_or(0)
+fn unsized_bucket(root: &std::path::Path) -> std::path::PathBuf {
+    root.join("store").join("unsized.bucket")
+}
+
+fn sized_bucket(root: &std::path::Path, size: usize) -> std::path::PathBuf {
+    root.join("store").join(format!("sized-{size:010}.bucket"))
+}
+
+fn bucket_len(path: &std::path::Path) -> u64 {
+    std::fs::metadata(path).map(|m| m.len()).unwrap_or(0)
 }
 
 #[test]
@@ -62,10 +62,67 @@ fn insert_and_get_with_buckets() {
         assert_eq!(db.get(&key(n)).unwrap().unwrap(), value(n, len));
     }
 
-    // The two bucketed lengths went to their own buckets, everything else to
-    // the variable-length one.
-    assert_eq!(count_segments(dir.path(), 1), 1);
-    assert_eq!(count_segments(dir.path(), 2), 1);
+    // The two bucketed lengths went to their own buckets unframed, and
+    // everything else to the variable-length one behind a length prefix. The
+    // empty value went nowhere at all.
+    assert_eq!(bucket_len(&sized_bucket(dir.path(), 32)), 32);
+    assert_eq!(bucket_len(&sized_bucket(dir.path(), 64)), 64);
+    assert_eq!(
+        bucket_len(&unsized_bucket(dir.path())),
+        (1 + 1) + (1 + 33) + (2 + 4096)
+    );
+}
+
+#[test]
+fn empty_values_are_stored_in_the_index_alone() {
+    let dir = tempfile::tempdir().unwrap();
+
+    {
+        let db = DbRW::<32>::open_or_create(dir.path(), &Options::new()).unwrap();
+        for n in 0..8 {
+            assert!(db.insert(&key(n), b"").unwrap());
+        }
+        // Nothing was appended, so no bucket file grew by a single byte.
+        assert_eq!(bucket_len(&unsized_bucket(dir.path())), 0);
+        for n in 0..8 {
+            assert_eq!(db.get(&key(n)).unwrap().unwrap(), b"");
+        }
+    }
+
+    // And they survive a reopen, which is where a store-backed record would
+    // have needed a checkpointed frontier to be recovered.
+    let db = DbRO::<32>::open(dir.path()).unwrap();
+    assert_eq!(db.len().unwrap(), 8);
+    for n in 0..8 {
+        assert_eq!(db.get(&key(n)).unwrap().unwrap(), b"");
+    }
+    assert!(db.get(&key(8)).unwrap().is_none());
+}
+
+#[test]
+fn bucket_files_are_named_after_their_record_size() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = DbRW::<32>::open_or_create(dir.path(), &Options::new().buckets([32, 1024])).unwrap();
+
+    db.insert(&key(1), &value(1, 32)).unwrap();
+    db.insert(&key(2), &value(2, 1024)).unwrap();
+    db.insert(&key(3), &value(3, 7)).unwrap();
+
+    let mut names: Vec<_> = std::fs::read_dir(dir.path().join("store"))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|name| name.ends_with(".bucket"))
+        .collect();
+    names.sort();
+
+    assert_eq!(
+        names,
+        [
+            "sized-0000000032.bucket",
+            "sized-0000001024.bucket",
+            "unsized.bucket",
+        ]
+    );
 }
 
 #[test]
@@ -163,36 +220,40 @@ fn data_survives_reopen() {
 }
 
 #[test]
-fn segments_roll_over_and_stay_readable() {
+fn many_records_in_one_bucket_stay_readable() {
     let dir = tempfile::tempdir().unwrap();
-    let db = DbRW::<32>::open_or_create(dir.path(), &Options::new().segment_size(1024).bucket(100))
-        .unwrap();
+    let db = DbRW::<32>::open_or_create(dir.path(), &Options::new().bucket(100)).unwrap();
 
-    for n in 0..100 {
+    for n in 0..1_000 {
         db.insert(&key(n), &value(n, 100)).unwrap();
     }
-    for n in 0..100 {
+    for n in 0..1_000 {
         assert_eq!(db.get(&key(n)).unwrap().unwrap(), value(n, 100));
     }
 
-    // 10 records of 100 bytes per 1 KiB segment, and no record straddles a
-    // segment boundary.
-    assert_eq!(count_segments(dir.path(), 1), 10);
+    // Unframed records pack at an exact stride, so the bucket file is the
+    // payloads and nothing besides.
+    assert_eq!(bucket_len(&sized_bucket(dir.path(), 100)), 1_000 * 100);
 }
 
 #[test]
-fn record_larger_than_a_segment_gets_its_own() {
+fn large_values_round_trip() {
     let dir = tempfile::tempdir().unwrap();
-    let db = DbRW::<32>::open_or_create(dir.path(), &Options::new().segment_size(1024)).unwrap();
+    let db = DbRW::<32>::open_or_create(dir.path(), &Options::new()).unwrap();
 
     db.insert(&key(1), &value(1, 10)).unwrap();
-    db.insert(&key(2), &value(2, 5000)).unwrap();
+    db.insert(&key(2), &value(2, 5_000)).unwrap();
     db.insert(&key(3), &value(3, 10)).unwrap();
 
     assert_eq!(db.get(&key(1)).unwrap().unwrap(), value(1, 10));
-    assert_eq!(db.get(&key(2)).unwrap().unwrap(), value(2, 5000));
+    assert_eq!(db.get(&key(2)).unwrap().unwrap(), value(2, 5_000));
     assert_eq!(db.get(&key(3)).unwrap().unwrap(), value(3, 10));
-    assert_eq!(count_segments(dir.path(), 0), 3);
+
+    // One prefix byte for each short value, two for the 5 000-byte one.
+    assert_eq!(
+        bucket_len(&unsized_bucket(dir.path())),
+        (1 + 10) + (2 + 5_000) + (1 + 10)
+    );
 }
 
 #[test]
@@ -314,7 +375,7 @@ fn keys_of_other_lengths() {
 #[test]
 fn bytes_written_past_the_checkpoint_are_truncated() {
     let dir = tempfile::tempdir().unwrap();
-    let segment = dir.path().join("store").join("b000").join("0000000000.seg");
+    let bucket = unsized_bucket(dir.path());
 
     {
         let db = DbRW::<32>::open_or_create(dir.path(), &Options::new()).unwrap();
@@ -322,7 +383,7 @@ fn bytes_written_past_the_checkpoint_are_truncated() {
             db.insert(&key(n), &value(n, 30)).unwrap();
         }
     }
-    let committed = std::fs::metadata(&segment).unwrap().len();
+    let committed = bucket_len(&bucket);
 
     // A crash in the middle of an append leaves bytes past the frontier the
     // checkpoint published.
@@ -330,14 +391,14 @@ fn bytes_written_past_the_checkpoint_are_truncated() {
         use std::io::Write;
         let mut file = std::fs::OpenOptions::new()
             .append(true)
-            .open(&segment)
+            .open(&bucket)
             .unwrap();
         file.write_all(&[0xab; 500]).unwrap();
     }
-    assert_eq!(std::fs::metadata(&segment).unwrap().len(), committed + 500);
+    assert_eq!(bucket_len(&bucket), committed + 500);
 
     let db = DbRW::<32>::open(dir.path()).unwrap();
-    assert_eq!(std::fs::metadata(&segment).unwrap().len(), committed);
+    assert_eq!(bucket_len(&bucket), committed);
 
     for n in 0..16 {
         assert_eq!(db.get(&key(n)).unwrap().unwrap(), value(n, 30));
@@ -345,25 +406,6 @@ fn bytes_written_past_the_checkpoint_are_truncated() {
     // The recovered store keeps accepting writes at the right offset.
     db.insert(&key(99), &value(99, 30)).unwrap();
     assert_eq!(db.get(&key(99)).unwrap().unwrap(), value(99, 30));
-}
-
-#[test]
-fn segments_past_the_checkpoint_are_discarded() {
-    let dir = tempfile::tempdir().unwrap();
-    let bucket = dir.path().join("store").join("b000");
-
-    {
-        let db = DbRW::<32>::open_or_create(dir.path(), &Options::new()).unwrap();
-        db.insert(&key(1), b"kept").unwrap();
-    }
-
-    // A segment the writer had rolled into but never checkpointed.
-    std::fs::write(bucket.join("0000000007.seg"), [0xcd; 64]).unwrap();
-    assert_eq!(count_segments(dir.path(), 0), 2);
-
-    let db = DbRW::<32>::open(dir.path()).unwrap();
-    assert_eq!(count_segments(dir.path(), 0), 1);
-    assert_eq!(db.get(&key(1)).unwrap().unwrap(), b"kept");
 }
 
 #[test]
@@ -378,14 +420,17 @@ fn recovery_is_per_bucket() {
     }
 
     // Junk in every bucket at once.
-    for tag in 0..3u8 {
+    let buckets = [
+        unsized_bucket(dir.path()),
+        sized_bucket(dir.path(), 32),
+        sized_bucket(dir.path(), 64),
+    ];
+    for bucket in &buckets {
         use std::io::Write;
-        let path = dir
-            .path()
-            .join("store")
-            .join(format!("b{tag:03}"))
-            .join("0000000000.seg");
-        let mut file = std::fs::OpenOptions::new().append(true).open(path).unwrap();
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(bucket)
+            .unwrap();
         file.write_all(&[0xff; 128]).unwrap();
     }
 
@@ -394,14 +439,8 @@ fn recovery_is_per_bucket() {
     assert_eq!(db.get(&key(2)).unwrap().unwrap(), value(2, 64));
     assert_eq!(db.get(&key(3)).unwrap().unwrap(), value(3, 7));
 
-    for tag in 0..3u8 {
-        let path = dir
-            .path()
-            .join("store")
-            .join(format!("b{tag:03}"))
-            .join("0000000000.seg");
-        let len = std::fs::metadata(path).unwrap().len();
-        assert_eq!(len, [7 + 1, 32, 64][tag as usize] as u64);
+    for (bucket, expected) in buckets.iter().zip([1 + 7, 32, 64]) {
+        assert_eq!(bucket_len(bucket), expected);
     }
 }
 
@@ -427,22 +466,14 @@ fn open_requires_an_existing_database() {
 #[test]
 fn open_reads_the_configuration_back_from_disk() {
     let dir = tempfile::tempdir().unwrap();
-    drop(
-        DbRW::<32>::open_or_create(
-            dir.path(),
-            &Options::new().segment_size(4096).buckets([32, 64]),
-        )
-        .unwrap(),
-    );
+    drop(DbRW::<32>::open_or_create(dir.path(), &Options::new().buckets([32, 64])).unwrap());
 
     let db = DbRW::<32>::open(dir.path()).unwrap();
     assert_eq!(db.buckets(), &[32, 64]);
-    assert_eq!(db.segment_size(), 4096);
     drop(db);
 
     let db = DbRO::<32>::open(dir.path()).unwrap();
     assert_eq!(db.buckets(), &[32, 64]);
-    assert_eq!(db.segment_size(), 4096);
 }
 
 #[test]
@@ -495,20 +526,6 @@ fn open_or_create_rejects_key_length_mismatch() {
 }
 
 #[test]
-fn open_or_create_rejects_segment_size_mismatch() {
-    let dir = tempfile::tempdir().unwrap();
-    drop(DbRW::<32>::open_or_create(dir.path(), &Options::new().segment_size(4096)).unwrap());
-
-    // Leaving it unset asserts the default, so it mismatches just the same.
-    for options in [Options::new().segment_size(8192), Options::new()] {
-        assert!(matches!(
-            DbRW::<32>::open_or_create(dir.path(), &options),
-            Err(Error::SegmentSizeMismatch { stored: 4096, .. })
-        ));
-    }
-}
-
-#[test]
 fn read_only_open_or_create_bootstraps_a_missing_database() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("fresh");
@@ -558,14 +575,10 @@ fn read_only_open_or_create_matches_an_existing_database() {
 }
 
 #[test]
-fn zero_sized_options_are_rejected() {
+fn zero_sized_bucket_is_rejected() {
     let dir = tempfile::tempdir().unwrap();
     assert!(matches!(
         DbRW::<32>::open_or_create(dir.path(), &Options::new().bucket(0)),
         Err(Error::ZeroBucket)
-    ));
-    assert!(matches!(
-        DbRW::<32>::open_or_create(dir.path(), &Options::new().segment_size(0)),
-        Err(Error::ZeroSegmentSize)
     ));
 }

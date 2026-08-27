@@ -15,11 +15,10 @@ mod lock;
 use lock::LockFile;
 
 mod options;
-pub use options::{DEFAULT_INDEX_MAP_SIZE, Options};
+pub use options::{DEFAULT_BUCKETS, DEFAULT_INDEX_MAP_SIZE, Options};
 
 mod store;
 use store::{Pointer, Store};
-pub use store::DEFAULT_SEGMENT_SIZE;
 
 mod sys;
 
@@ -59,10 +58,10 @@ pub struct DbRW<const K: usize> {
 
 /// A database open for reading.
 ///
-/// Reads no configuration from the caller: key length, segment size and the
-/// bucket layout all come from the database itself. Sees every entry the
-/// writer has committed, including data written to buckets and segments that
-/// did not exist when this handle was opened.
+/// Reads no configuration from the caller: the key length and the bucket
+/// layout both come from the database itself. Sees every entry the writer has
+/// committed, including data written to buckets that did not exist when this
+/// handle was opened.
 #[derive(Debug)]
 pub struct DbRO<const K: usize> {
     path: PathBuf,
@@ -73,8 +72,8 @@ pub struct DbRO<const K: usize> {
 impl<const K: usize> DbRW<K> {
     /// Open an existing database for reading and writing.
     ///
-    /// The whole stored configuration — key length, segment size and bucket
-    /// layout — is read back from the database, so none of it is passed in.
+    /// The whole stored configuration — key length and bucket layout — is read
+    /// back from the database, so none of it is passed in.
     /// Fails with [`Error::NotInitialized`] if there is no database at `path`;
     /// use [`open_or_create`](Self::open_or_create) to make one.
     ///
@@ -96,10 +95,9 @@ impl<const K: usize> DbRW<K> {
     /// Create the database at `path` with `options`, or open the one already
     /// there and require its configuration to match `options`.
     ///
-    /// A database that does not exist is created with exactly this key length,
-    /// segment size and bucket layout. One that does exist must already have
-    /// them: a different key length fails with [`Error::KeyLenMismatch`], a
-    /// different segment size with [`Error::SegmentSizeMismatch`], and a
+    /// A database that does not exist is created with exactly this key length
+    /// and bucket layout. One that does exist must already have them: a
+    /// different key length fails with [`Error::KeyLenMismatch`] and a
     /// different set of buckets with [`Error::BucketsMismatch`]. Bucket
     /// *order* is not compared, since it only fixes internal tags.
     pub fn open_or_create(path: impl AsRef<Path>, options: &Options) -> Result<Self> {
@@ -124,11 +122,6 @@ impl<const K: usize> DbRW<K> {
     /// Record sizes of this database's buckets, in tag order.
     pub fn buckets(&self) -> &[usize] {
         self.store.bucket_sizes()
-    }
-
-    /// The segment size this database was created with.
-    pub fn segment_size(&self) -> u64 {
-        self.store.segment_size()
     }
 
     pub fn path(&self) -> &Path {
@@ -187,11 +180,6 @@ impl<const K: usize> DbRO<K> {
     /// Record sizes of this database's buckets, in tag order.
     pub fn buckets(&self) -> &[usize] {
         self.store.bucket_sizes()
-    }
-
-    /// The segment size this database was created with.
-    pub fn segment_size(&self) -> u64 {
-        self.store.segment_size()
     }
 
     pub fn path(&self) -> &Path {

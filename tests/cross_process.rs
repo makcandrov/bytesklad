@@ -93,20 +93,19 @@ fn child_sees_writer_commits() {
 }
 
 #[test]
-fn reader_process_follows_segment_rollover() {
+fn reader_process_follows_a_growing_bucket() {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path();
 
-    let writer =
-        DbRW::<32>::open_or_create(db, &Options::new().segment_size(1024).bucket(100)).unwrap();
+    let writer = DbRW::<32>::open_or_create(db, &Options::new().bucket(100)).unwrap();
     writer.insert(&key(0), &value(0, 100)).unwrap();
 
-    let mut reader = spawn_reader("child_follows_segment_rollover", db);
+    let mut reader = spawn_reader("child_follows_a_growing_bucket", db);
     await_signal(db, "reader-ready");
 
-    // Well past the 1 KiB segment cap, so the reader must open segment files
-    // that did not exist when it started.
-    for n in 1..60 {
+    // The reader has already opened the bucket file by now, so these appends
+    // land past the end it saw when it did.
+    for n in 1..2_000 {
         writer.insert(&key(n), &value(n, 100)).unwrap();
     }
     signal(db, "go");
@@ -115,7 +114,7 @@ fn reader_process_follows_segment_rollover() {
 }
 
 #[test]
-fn child_follows_segment_rollover() {
+fn child_follows_a_growing_bucket() {
     let Some(db) = assigned_db() else { return };
 
     let reader = DbRO::<32>::open(&db).unwrap();
@@ -124,10 +123,10 @@ fn child_follows_segment_rollover() {
     signal(&db, "reader-ready");
     await_signal(&db, "go");
 
-    for n in 0..60 {
+    for n in 0..2_000 {
         assert_eq!(reader.get(&key(n)).unwrap().unwrap(), value(n, 100));
     }
-    assert_eq!(reader.len().unwrap(), 60);
+    assert_eq!(reader.len().unwrap(), 2_000);
 }
 
 #[test]

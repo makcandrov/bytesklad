@@ -4,12 +4,16 @@ const OFFSET_BITS: u32 = 56;
 /// Largest addressable logical offset within a single bucket (64 PiB).
 pub(crate) const MAX_OFFSET: u64 = (1 << OFFSET_BITS) - 1;
 
-/// Tag `0` is reserved for the variable-length bucket, leaving tags `1..=255`
-/// for size buckets.
-pub(crate) const MAX_BUCKETS: usize = u8::MAX as usize;
+/// Tag `0` is reserved for the empty value and tag `255` for the
+/// variable-length bucket, leaving tags `1..=254` for size buckets.
+pub(crate) const MAX_BUCKETS: usize = u8::MAX as usize - 1;
+
+/// Tag of the empty value, which has no bucket and no file behind it: the tag
+/// alone carries the whole record, and it packs to the all-zero pointer.
+pub(crate) const EMPTY_TAG: u8 = 0;
 
 /// Tag of the variable-length bucket.
-pub(crate) const UNSIZED_TAG: u8 = 0;
+pub(crate) const UNSIZED_TAG: u8 = u8::MAX;
 
 /// The entire index value for one record, packed into eight bytes:
 /// an 8-bit bucket tag and a 56-bit logical offset inside that bucket.
@@ -20,6 +24,10 @@ pub(crate) const UNSIZED_TAG: u8 = 0;
 pub(crate) struct Pointer(u64);
 
 impl Pointer {
+    /// The pointer of every empty value: all zeros, and resolving it touches
+    /// no file.
+    pub const EMPTY: Self = Self((EMPTY_TAG as u64) << OFFSET_BITS);
+
     pub fn new(tag: u8, offset: u64) -> Option<Self> {
         (offset <= MAX_OFFSET).then(|| Self((u64::from(tag) << OFFSET_BITS) | offset))
     }
@@ -47,7 +55,7 @@ mod tests {
 
     #[test]
     fn round_trips() {
-        for (tag, offset) in [(0u8, 0u64), (1, 4096), (255, MAX_OFFSET), (7, 1 << 40)] {
+        for (tag, offset) in [(0u8, 0u64), (1, 4096), (254, MAX_OFFSET), (7, 1 << 40)] {
             let ptr = Pointer::new(tag, offset).unwrap();
             assert_eq!(ptr.tag(), tag);
             assert_eq!(ptr.offset(), offset);

@@ -4,14 +4,14 @@ use std::{
     path::Path,
 };
 
-/// Read handle on one segment file. Shared by any number of threads; every
-/// read is a positioned read, so no shared file cursor is involved.
+/// Read handle on one bucket file. Shared by any number of threads; every read
+/// is a positioned read, so no shared file cursor is involved.
 #[derive(Debug)]
-pub(crate) struct SegmentReader {
+pub(crate) struct Reader {
     file: File,
 }
 
-impl SegmentReader {
+impl Reader {
     pub fn open(path: &Path) -> io::Result<Self> {
         Ok(Self {
             file: OpenOptions::new().read(true).open(path)?,
@@ -38,7 +38,7 @@ impl SegmentReader {
     }
 
     /// Best-effort positioned read: may return fewer bytes than requested,
-    /// including when the read runs into the end of the segment.
+    /// including when the read runs into the end of the file.
     pub fn read_at(&self, buf: &mut [u8], offset: u64) -> io::Result<usize> {
         #[cfg(unix)]
         {
@@ -53,19 +53,19 @@ impl SegmentReader {
     }
 }
 
-/// Append handle on the one segment currently being written.
+/// Append handle on one bucket file.
 ///
 /// `dirty` tracks whether any bytes have been appended since the last fsync,
 /// so [`sync`](Self::sync) can skip the syscall entirely for untouched
-/// segments — the write path fsyncs what it wrote, not every file it holds.
+/// buckets — the write path fsyncs what it wrote, not every file it holds.
 #[derive(Debug)]
-pub(crate) struct SegmentWriter {
+pub(crate) struct Writer {
     file: File,
     len: u64,
     dirty: bool,
 }
 
-impl SegmentWriter {
+impl Writer {
     pub fn open(path: &Path) -> io::Result<Self> {
         let file = OpenOptions::new().create(true).append(true).open(path)?;
         let len = file.metadata()?.len();
@@ -107,10 +107,10 @@ mod tests {
     #[test]
     fn sync_is_skipped_when_nothing_was_appended() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("0000000000.seg");
-        let mut writer = SegmentWriter::open(&path).unwrap();
+        let path = dir.path().join("unsized.bucket");
+        let mut writer = Writer::open(&path).unwrap();
 
-        // A freshly opened segment owes the disk nothing.
+        // A freshly opened bucket owes the disk nothing.
         assert!(!writer.dirty);
         assert_eq!(writer.sync().unwrap(), 0);
 
@@ -127,16 +127,16 @@ mod tests {
     }
 
     #[test]
-    fn writer_resumes_from_an_existing_segment() {
+    fn writer_resumes_from_an_existing_file() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("0000000000.seg");
+        let path = dir.path().join("unsized.bucket");
 
-        SegmentWriter::open(&path).unwrap().append(b"abc").unwrap();
+        Writer::open(&path).unwrap().append(b"abc").unwrap();
 
-        let writer = SegmentWriter::open(&path).unwrap();
+        let writer = Writer::open(&path).unwrap();
         assert_eq!(writer.len(), 3);
 
-        let reader = SegmentReader::open(&path).unwrap();
+        let reader = Reader::open(&path).unwrap();
         let mut buf = [0u8; 3];
         reader.read_exact_at(&mut buf, 0).unwrap();
         assert_eq!(&buf, b"abc");

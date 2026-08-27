@@ -1,8 +1,12 @@
-use crate::{Error, Result, store::DEFAULT_SEGMENT_SIZE};
+use crate::{Error, Result};
 
 /// Default upper bound on the index's memory map. This reserves address
 /// space, not disk: the index file grows on demand within the limit.
 pub const DEFAULT_INDEX_MAP_SIZE: u64 = 4 * 1024 * 1024 * 1024 * 1024;
+
+/// Default bucket layout: none, so every value is framed with its own length
+/// in the variable-length bucket.
+pub const DEFAULT_BUCKETS: &[usize] = &[];
 
 /// The configuration a database is created with.
 ///
@@ -28,16 +32,19 @@ pub const DEFAULT_INDEX_MAP_SIZE: u64 = 4 * 1024 * 1024 * 1024 * 1024;
 /// [`DbRO::open_or_create`]: crate::DbRO::open_or_create
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Options {
-    pub(crate) buckets: Vec<usize>,
-    pub(crate) segment_size: u64,
-    pub(crate) index_map_size: u64,
+    /// Record sizes that get a bucket of their own, one tag each and at most
+    /// 254 of them. Repeats are ignored. See [`bucket`](Self::bucket).
+    pub buckets: Vec<usize>,
+    /// Upper bound on the index's memory map, in bytes. Unlike `buckets` this
+    /// is not part of the stored configuration, so it is never matched against
+    /// disk. See [`index_map_size`](Self::index_map_size).
+    pub index_map_size: u64,
 }
 
 impl Default for Options {
     fn default() -> Self {
         Self {
-            buckets: Vec::new(),
-            segment_size: DEFAULT_SEGMENT_SIZE,
+            buckets: DEFAULT_BUCKETS.to_vec(),
             index_map_size: DEFAULT_INDEX_MAP_SIZE,
         }
     }
@@ -53,7 +60,7 @@ impl Options {
     /// Values of that length are then stored unframed, and their length is
     /// recovered from the bucket instead of from the index. Worth doing for
     /// lengths that make up a large share of the data set; pointless for rare
-    /// ones, which cost a directory and a segment file each.
+    /// ones, which cost a file each.
     pub fn bucket(mut self, record_size: usize) -> Self {
         if !self.buckets.contains(&record_size) {
             self.buckets.push(record_size);
@@ -69,17 +76,6 @@ impl Options {
         self
     }
 
-    /// Cap on the size of one segment file, defaulting to
-    /// [`DEFAULT_SEGMENT_SIZE`].
-    ///
-    /// Larger segments mean fewer, bigger files; smaller ones mean
-    /// finer-grained backup and replication units, and more open file
-    /// descriptors.
-    pub fn segment_size(mut self, bytes: u64) -> Self {
-        self.segment_size = bytes;
-        self
-    }
-
     /// Upper bound on the index's memory map, defaulting to
     /// [`DEFAULT_INDEX_MAP_SIZE`]. Raise it if the index may exceed 4 TiB.
     ///
@@ -91,9 +87,6 @@ impl Options {
     }
 
     pub(crate) fn validate(&self) -> Result<()> {
-        if self.segment_size == 0 {
-            return Err(Error::ZeroSegmentSize);
-        }
         if self.buckets.contains(&0) {
             return Err(Error::ZeroBucket);
         }
