@@ -55,10 +55,12 @@ store to save bytes in the index.
      which bucket                  where in that bucket's file
 ```
 
-There is no length field: the length is either implied by the tag or stored
-alongside the bytes. An MDBX leaf entry costs about `key + value + 10` bytes, so
-under 32-byte keys an 8-byte value is ~50 bytes against 54 for a 12-byte one —
-7% off the layer that dominates both disk footprint and random-read cost.
+There is no length field: the length is either implied by the tag, stored
+alongside the bytes, or — for a value short enough to fit in the pointer —
+carried right there beside it. An MDBX leaf entry costs about
+`key + value + 10` bytes, so under 32-byte keys an 8-byte value is ~50 bytes
+against 54 for a 12-byte one — 7% off the layer that dominates both disk
+footprint and random-read cost.
 
 ### Buckets
 
@@ -68,16 +70,16 @@ offset in that file — so a read is one positioned `pread` at the offset the
 index handed back, with no table in between.
 
 **The variable-length bucket** (tag `255`) always exists and takes anything that
-does not match a size bucket. Each record carries its own length, LEB128-encoded:
-one byte under 128, two under 16 KiB.
+neither fits inline nor matches a size bucket. Each record carries its own
+length, LEB128-encoded: one byte under 128, two under 16 KiB.
 
 ```txt
    [varint length][payload][varint length][payload][varint length][payload]
 ```
 
 **Size buckets** (tags `1..=254`) are declared by you, each pinned to one exact
-record length. Their records carry no framing at all, because the bucket *is*
-the length:
+record length of seven bytes or more. Their records carry no framing at all,
+because the bucket *is* the length:
 
 ```txt
    [payload][payload][payload][payload][payload][payload][payload][payload]
@@ -87,9 +89,27 @@ Declaring a bucket for 32 therefore drops the framing byte, makes a read a
 single positioned read of a known size with nothing to parse, and packs records
 at an exact stride — 128 per 4 KiB page, none straddling a page boundary.
 
-**The empty value** (tag `0`) never reaches a bucket at all: it has nothing to
-store, so its tag alone reconstructs it. Reading one costs no file access, and
-inserting one leaves the store clean, with nothing to fsync.
+**Inline values** (tag `0`) never reach a bucket at all. The 56 bits that would
+have held an offset hold the record itself instead — up to six payload bytes
+and a three-bit length that says how many of them count:
+
+```txt
+   63       56 55     51 50  48 47                             0
+  ┌───────────┬─────────┬──────┬───────────────────────────────┐
+  │  tag = 0  │ zero (5)│ len  │        payload (48)           │
+  └───────────┴─────────┴──────┴───────────────────────────────┘
+```
+
+Reading one costs no file access at all — the index lookup *is* the read — and
+inserting one leaves the store clean, with nothing to fsync. A batch of nothing
+but short values touches the store not once. The empty value is simply the
+`len = 0` case, and packs to the all-zero pointer.
+
+Six bytes is the ceiling, not a tuning knob: a seventh payload byte would fill
+the 56 bits exactly and leave nothing to encode the length with. No cleverer
+packing rescues it either — the byte strings of length `0..=7` outnumber the
+56-bit patterns by a factor of `256/255`. For the same reason a size bucket of
+six bytes or fewer is rejected at creation: it could never receive a record.
 
 Buckets pay off in proportion to how many records share the length, so they are
 opt-in and few. Value lengths are usually Zipf-shaped — a handful of lengths
@@ -131,7 +151,8 @@ For `get(key)` on a database with buckets `[32, 64]`:
 
 Under tag `255`, step 3 speculatively reads 512 bytes and decodes the length
 prefix instead — still one syscall, unless the value runs past the probe, in
-which case the remainder is fetched exactly. Under tag `0` there is no step 3.
+which case the remainder is fetched exactly. Under tag `0` steps 2 and 3 do not
+happen: the pointer step 1 returned already holds the bytes.
 
 ---
 
@@ -222,7 +243,8 @@ writing fails, because MDBX permits one environment handle per process.
 |---|---|
 | Key length | fixed at creation, any `K` |
 | Value length | 0 bytes to 64 PiB, though the index caps practical sizes far below that |
-| Size buckets | 254 over the lifetime of a database |
+| Inline values | up to 6 bytes, carried by the index entry with no file behind them |
+| Size buckets | 254 over the lifetime of a database, each of 7 bytes or more |
 | Bucket capacity | 64 PiB of address space each, or the filesystem's maximum file size if that is lower |
 | Writers | one per database, process-wide exclusion |
 | Readers | unbounded, in other processes |

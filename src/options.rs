@@ -1,4 +1,4 @@
-use crate::{Error, Result};
+use crate::{Error, Result, store::MAX_INLINE_LEN};
 
 /// Default upper bound on the index's memory map. This reserves address
 /// space, not disk: the index file grows on demand within the limit.
@@ -33,7 +33,8 @@ pub const DEFAULT_BUCKETS: &[usize] = &[];
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Options {
     /// Record sizes that get a bucket of their own, one tag each and at most
-    /// 254 of them. Repeats are ignored. See [`bucket`](Self::bucket).
+    /// 254 of them. Each must exceed six bytes. Repeats are ignored. See
+    /// [`bucket`](Self::bucket).
     pub buckets: Vec<usize>,
     /// Upper bound on the index's memory map, in bytes. Unlike `buckets` this
     /// is not part of the stored configuration, so it is never matched against
@@ -61,6 +62,11 @@ impl Options {
     /// recovered from the bucket instead of from the index. Worth doing for
     /// lengths that make up a large share of the data set; pointless for rare
     /// ones, which cost a file each.
+    ///
+    /// `record_size` must be seven or more: values of six bytes or fewer are
+    /// held in the index entry itself and never reach a bucket, so a smaller
+    /// one could never receive a record. Declaring it fails with
+    /// [`Error::BucketTooSmall`].
     pub fn bucket(mut self, record_size: usize) -> Self {
         if !self.buckets.contains(&record_size) {
             self.buckets.push(record_size);
@@ -87,8 +93,10 @@ impl Options {
     }
 
     pub(crate) fn validate(&self) -> Result<()> {
-        if self.buckets.contains(&0) {
-            return Err(Error::ZeroBucket);
+        if self.buckets.iter().any(|&size| size <= MAX_INLINE_LEN) {
+            return Err(Error::BucketTooSmall {
+                max_inline: MAX_INLINE_LEN,
+            });
         }
         Ok(())
     }

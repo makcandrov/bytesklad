@@ -1,12 +1,13 @@
 use std::{fs, io, path::Path};
 
-use crate::{Error, Result, store::pointer::MAX_BUCKETS, sys};
+use crate::{
+    Error, Result,
+    store::pointer::{MAX_BUCKETS, MAX_INLINE_LEN},
+    sys,
+};
 
 const MAGIC: [u8; 8] = *b"SKLDREGY";
-// Bumped when tag `0` stopped meaning the variable-length bucket and started
-// meaning the empty value: a v2 database read under these tags would return
-// every variable-length value as empty.
-const VERSION: u32 = 3;
+const VERSION: u32 = 1;
 const HEADER_LEN: usize = 24;
 const ENTRY_LEN: usize = 8;
 const FILE: &str = "registry";
@@ -75,8 +76,10 @@ impl Registry {
     pub fn add_buckets(&mut self, requested: &[usize]) -> Result<bool> {
         let mut added = false;
         for &size in requested {
-            if size == 0 {
-                return Err(Error::ZeroBucket);
+            if size <= MAX_INLINE_LEN {
+                return Err(Error::BucketTooSmall {
+                    max_inline: MAX_INLINE_LEN,
+                });
             }
             if self.buckets.contains(&size) {
                 continue;

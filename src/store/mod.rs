@@ -18,9 +18,10 @@ mod pointer;
 mod registry;
 
 use bucket::{Bucket, Kind};
-pub(crate) use pointer::Pointer;
-use pointer::{EMPTY_TAG, MAX_OFFSET, UNSIZED_TAG};
+use pointer::{INLINE_TAG, MAX_OFFSET, UNSIZED_TAG};
 use registry::Registry;
+
+pub(crate) use pointer::{MAX_INLINE_LEN, Pointer};
 
 /// The byte store: every value ever inserted, laid out one file per bucket.
 #[derive(Debug)]
@@ -126,17 +127,21 @@ impl Store {
     }
 
     pub fn read(&self, pointer: Pointer) -> Result<Vec<u8>> {
-        if pointer.tag() == EMPTY_TAG {
-            return Ok(Vec::new());
+        if pointer.tag() == INLINE_TAG {
+            return pointer
+                .inline_value()
+                .ok_or_else(|| Error::corrupt("index", "inline length out of range"));
         }
         self.bucket(pointer.tag())?.read(pointer.offset())
     }
 
     pub fn append(&self, value: &[u8]) -> Result<Pointer> {
-        // The empty value lives entirely in its tag: no bytes are written, so
-        // the store stays clean and nothing needs to be fsynced for it.
-        if value.is_empty() {
-            return Ok(Pointer::EMPTY);
+        // Short values live entirely in their pointer: no bytes are written,
+        // so the store stays clean and nothing needs to be fsynced for them.
+        // Checked before routing, which is why a size bucket at or below
+        // `MAX_INLINE_LEN` is rejected at configuration time.
+        if let Some(pointer) = Pointer::inline(value) {
+            return Ok(pointer);
         }
         let tag = self
             .routing
@@ -236,7 +241,7 @@ fn check_key_len(registry: &Registry, key_len: usize) -> Result<()> {
 /// Position of `tag`'s bucket in `Store::buckets`, which holds the
 /// variable-length bucket first and then the size buckets in tag order. Tags
 /// are not usable as indices directly: the variable-length one is `255`, and
-/// `EMPTY_TAG` has no bucket at all and never reaches here.
+/// `INLINE_TAG` has no bucket at all and never reaches here.
 fn slot(tag: u8) -> usize {
     match tag {
         UNSIZED_TAG => 0,

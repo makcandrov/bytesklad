@@ -24,8 +24,11 @@ pub enum Error {
         requested: Vec<usize>,
     },
 
-    #[error("a bucket record size must be greater than zero")]
-    ZeroBucket,
+    #[error(
+        "a bucket record size must be greater than {max_inline}: \
+         values that short are stored in the index itself"
+    )]
+    BucketTooSmall { max_inline: usize },
 
     #[error("too many buckets: at most {max} may be declared over the lifetime of a database")]
     TooManyBuckets { max: usize },

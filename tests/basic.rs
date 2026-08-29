@@ -62,41 +62,71 @@ fn insert_and_get_with_buckets() {
         assert_eq!(db.get(&key(n)).unwrap().unwrap(), value(n, len));
     }
 
-    // The two bucketed lengths went to their own buckets unframed, and
-    // everything else to the variable-length one behind a length prefix. The
-    // empty value went nowhere at all.
+    // The two bucketed lengths went to their own buckets unframed, and the
+    // lengths past the inline limit to the variable-length one behind a
+    // length prefix. The 0- and 1-byte values went nowhere at all.
     assert_eq!(bucket_len(&sized_bucket(dir.path(), 32)), 32);
     assert_eq!(bucket_len(&sized_bucket(dir.path(), 64)), 64);
     assert_eq!(
         bucket_len(&unsized_bucket(dir.path())),
-        (1 + 1) + (1 + 33) + (2 + 4096)
+        (1 + 33) + (2 + 4096)
     );
 }
 
 #[test]
-fn empty_values_are_stored_in_the_index_alone() {
+fn short_values_are_stored_in_the_index_alone() {
     let dir = tempfile::tempdir().unwrap();
+
+    // Every length up to six inclusive rides in the pointer; seven is the
+    // first that needs the store.
+    let short: Vec<Vec<u8>> = (0..=6).map(|len| value(len as u64, len)).collect();
 
     {
         let db = DbRW::<32>::open_or_create(dir.path(), &Options::new()).unwrap();
-        for n in 0..8 {
-            assert!(db.insert(&key(n), b"").unwrap());
+        for (n, v) in short.iter().enumerate() {
+            assert!(db.insert(&key(n as u64), v).unwrap());
         }
         // Nothing was appended, so no bucket file grew by a single byte.
         assert_eq!(bucket_len(&unsized_bucket(dir.path())), 0);
-        for n in 0..8 {
-            assert_eq!(db.get(&key(n)).unwrap().unwrap(), b"");
+        for (n, v) in short.iter().enumerate() {
+            assert_eq!(&db.get(&key(n as u64)).unwrap().unwrap(), v);
         }
+
+        // One byte more and the store takes over.
+        db.insert(&key(7), &value(7, 7)).unwrap();
+        assert_eq!(bucket_len(&unsized_bucket(dir.path())), 1 + 7);
     }
 
     // And they survive a reopen, which is where a store-backed record would
     // have needed a checkpointed frontier to be recovered.
     let db = DbRO::<32>::open(dir.path()).unwrap();
     assert_eq!(db.len().unwrap(), 8);
-    for n in 0..8 {
-        assert_eq!(db.get(&key(n)).unwrap().unwrap(), b"");
+    for (n, v) in short.iter().enumerate() {
+        assert_eq!(&db.get(&key(n as u64)).unwrap().unwrap(), v);
     }
+    assert_eq!(db.get(&key(7)).unwrap().unwrap(), value(7, 7));
     assert!(db.get(&key(8)).unwrap().is_none());
+}
+
+#[test]
+fn inline_values_distinguish_length_from_trailing_zeros() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = DbRW::<32>::open_or_create(dir.path(), &Options::new()).unwrap();
+
+    // Values that a trailing-zero-trimming encoding would conflate.
+    for (n, v) in [b"".as_slice(), b"\0", b"\0\0", b"a\0", b"a"]
+        .into_iter()
+        .enumerate()
+    {
+        db.insert(&key(n as u64), v).unwrap();
+    }
+    for (n, v) in [b"".as_slice(), b"\0", b"\0\0", b"a\0", b"a"]
+        .into_iter()
+        .enumerate()
+    {
+        assert_eq!(db.get(&key(n as u64)).unwrap().unwrap(), v);
+    }
+    assert_eq!(bucket_len(&unsized_bucket(dir.path())), 0);
 }
 
 #[test]
@@ -575,10 +605,24 @@ fn read_only_open_or_create_matches_an_existing_database() {
 }
 
 #[test]
-fn zero_sized_bucket_is_rejected() {
+fn buckets_at_or_below_the_inline_limit_are_rejected() {
+    // A bucket that short could never receive a record: values of six bytes
+    // or fewer are carried by the index entry and never reach the store.
+    for size in 0..=6 {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(
+            matches!(
+                DbRW::<32>::open_or_create(dir.path(), &Options::new().bucket(size)),
+                Err(Error::BucketTooSmall { max_inline: 6 })
+            ),
+            "bucket size {size} was accepted"
+        );
+    }
+
+    // Seven is the first size worth a bucket of its own.
     let dir = tempfile::tempdir().unwrap();
-    assert!(matches!(
-        DbRW::<32>::open_or_create(dir.path(), &Options::new().bucket(0)),
-        Err(Error::ZeroBucket)
-    ));
+    let db = DbRW::<32>::open_or_create(dir.path(), &Options::new().bucket(7)).unwrap();
+    db.insert(&key(1), &value(1, 7)).unwrap();
+    assert_eq!(db.get(&key(1)).unwrap().unwrap(), value(1, 7));
+    assert_eq!(bucket_len(&sized_bucket(dir.path(), 7)), 7);
 }
