@@ -11,7 +11,8 @@ keywords = ["database", "embedded", "key-value", "append-only", "storage"]
 categories = ["database-implementations"]
 
 [dependencies]
-libmdbx = "0.6"
+indexmap = "2"
+libmdbx = "0.9"
 parking_lot = "0.12"
 rustc-hash = "2"
 thiserror = "2"

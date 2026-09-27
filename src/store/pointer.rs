@@ -4,6 +4,9 @@ const OFFSET_BITS: u32 = 56;
 /// Largest addressable logical offset within a single bucket (64 PiB).
 pub(crate) const MAX_OFFSET: u64 = (1 << OFFSET_BITS) - 1;
 
+/// Size of a bucket's address space: offsets run from 0 to `MAX_OFFSET` inclusive.
+pub(crate) const MAX_BUCKET_LEN: u64 = MAX_OFFSET + 1;
+
 /// Tag `0` is reserved for inline values and tag `255` for the
 /// variable-length bucket, leaving tags `1..=254` for size buckets.
 pub(crate) const MAX_BUCKETS: usize = u8::MAX as usize - 1;

@@ -1,4 +1,7 @@
-use crate::{Error, Result, store::MAX_INLINE_LEN};
+use crate::{
+    Error, Result,
+    store::{MAX_BUCKET_LEN, MAX_INLINE_LEN},
+};
 
 /// Default upper bound on the index's memory map. This reserves address
 /// space, not disk: the index file grows on demand within the limit.
@@ -33,7 +36,8 @@ pub const DEFAULT_BUCKETS: &[usize] = &[];
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Options {
     /// Record sizes that get a bucket of their own, one tag each and at most
-    /// 254 of them. Each must exceed six bytes. Repeats are ignored. See
+    /// 254 of them. Each must exceed six bytes and fit within the 64 PiB bucket
+    /// address space. Repeats are ignored. See
     /// [`bucket`](Self::bucket).
     pub buckets: Vec<usize>,
     /// Upper bound on the index's memory map, in bytes. Unlike `buckets` this
@@ -66,7 +70,8 @@ impl Options {
     /// `record_size` must be seven or more: values of six bytes or fewer are
     /// held in the index entry itself and never reach a bucket, so a smaller
     /// one could never receive a record. Declaring it fails with
-    /// [`Error::BucketTooSmall`].
+    /// [`Error::BucketTooSmall`]. A size above 64 PiB fails with
+    /// [`Error::BucketTooLarge`].
     pub fn bucket(mut self, record_size: usize) -> Self {
         if !self.buckets.contains(&record_size) {
             self.buckets.push(record_size);
@@ -93,10 +98,17 @@ impl Options {
     }
 
     pub(crate) fn validate(&self) -> Result<()> {
-        if self.buckets.iter().any(|&size| size <= MAX_INLINE_LEN) {
-            return Err(Error::BucketTooSmall {
-                max_inline: MAX_INLINE_LEN,
-            });
+        for &bucket in &self.buckets {
+            if bucket <= MAX_INLINE_LEN {
+                return Err(Error::BucketTooSmall {
+                    max_inline: MAX_INLINE_LEN,
+                });
+            }
+            if bucket as u64 > MAX_BUCKET_LEN {
+                return Err(Error::BucketTooLarge {
+                    max: MAX_BUCKET_LEN,
+                });
+            }
         }
         Ok(())
     }

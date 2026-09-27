@@ -1,14 +1,24 @@
-use std::{fs, io, path::Path};
+use std::{
+    fs,
+    io::{self, Read},
+    path::Path,
+};
 
 use rustc_hash::FxHashMap;
 
-use crate::{Error, Result, sys};
+use crate::{
+    Error, Result,
+    store::pointer::{MAX_BUCKET_LEN, MAX_BUCKETS},
+    sys,
+};
 
 const MAGIC: [u8; 8] = *b"SKLDCKPT";
 const VERSION: u32 = 1;
 const HEADER_LEN: usize = 16;
 const ENTRY_LEN: usize = 12;
-const FILE: &str = "checkpoint";
+const MAX_ENTRIES: usize = MAX_BUCKETS + 1;
+const MAX_FILE_LEN: usize = HEADER_LEN + MAX_ENTRIES * ENTRY_LEN;
+pub(super) const FILE: &str = "checkpoint";
 
 /// The durable write frontier of every bucket: how many of its bytes are known
 /// to have reached stable storage.
@@ -20,16 +30,18 @@ const FILE: &str = "checkpoint";
 pub(crate) type Frontiers = FxHashMap<u8, u64>;
 
 pub(crate) fn load(dir: &Path) -> Result<Frontiers> {
-    // A torn or missing checkpoint is not an error: `atomic_write` guarantees
-    // the file is either the complete previous version or the complete next
-    // one, and an absent file simply means nothing has been synced yet. In
-    // both cases recovery falls back to an earlier, and therefore safe,
-    // frontier.
-    let raw = match fs::read(dir.join(FILE)) {
-        Ok(raw) => raw,
+    // Only an empty store can safely open without a checkpoint. The bucket
+    // recovery path checks this before truncating any data.
+    let file = match fs::File::open(dir.join(FILE)) {
+        Ok(file) => file,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Frontiers::default()),
         Err(e) => return Err(e.into()),
     };
+    let mut raw = Vec::new();
+    file.take((MAX_FILE_LEN + 1) as u64).read_to_end(&mut raw)?;
+    if raw.len() > MAX_FILE_LEN {
+        return Err(Error::corrupt(FILE, "checkpoint is too large"));
+    }
 
     if raw.len() < HEADER_LEN || raw[..8] != MAGIC {
         return Err(Error::corrupt(FILE, "bad magic"));
@@ -39,20 +51,22 @@ pub(crate) fn load(dir: &Path) -> Result<Frontiers> {
     }
 
     let count = u32::from_le_bytes(raw[12..16].try_into().unwrap()) as usize;
-    if raw.len() != HEADER_LEN + count * ENTRY_LEN {
+    if count == 0 || count > MAX_ENTRIES || raw.len() != HEADER_LEN + count * ENTRY_LEN {
         return Err(Error::corrupt(FILE, "truncated frontier table"));
     }
 
-    Ok(raw[HEADER_LEN..]
-        .as_chunks::<ENTRY_LEN>()
-        .0
-        .iter()
-        .map(|chunk| {
-            let tag = u32::from_le_bytes(chunk[..4].try_into().unwrap()) as u8;
-            let len = u64::from_le_bytes(chunk[4..].try_into().unwrap());
-            (tag, len)
-        })
-        .collect())
+    let mut frontiers = Frontiers::default();
+    for chunk in raw[HEADER_LEN..].as_chunks::<ENTRY_LEN>().0 {
+        let tag = u32::from_le_bytes(chunk[..4].try_into().unwrap());
+        let len = u64::from_le_bytes(chunk[4..].try_into().unwrap());
+        if !(1..=255).contains(&tag) || len > MAX_BUCKET_LEN {
+            return Err(Error::corrupt(FILE, "frontier out of range"));
+        }
+        if frontiers.insert(tag as u8, len).is_some() {
+            return Err(Error::corrupt(FILE, "duplicate bucket tag"));
+        }
+    }
+    Ok(frontiers)
 }
 
 pub(crate) fn store(dir: &Path, frontiers: &[(u8, u64)]) -> Result<()> {

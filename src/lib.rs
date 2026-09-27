@@ -38,11 +38,11 @@ const _: fn() = || {
 ///
 /// Only one `DbRW` may exist for a path at a time, across all processes; the
 /// exclusion is enforced by an advisory lock file and released if the process
-/// dies. Any number of [`DbRO`] handles, in this or other processes, may read
-/// concurrently with it.
+/// dies. Any number of [`DbRO`] handles in other processes may read
+/// concurrently with it; within this process, read through the `DbRW` itself.
 ///
 /// The handle is `Sync`: `insert` and `insert_batch` may be called from
-/// several threads at once.
+/// several threads at once, and their batches run one at a time.
 #[derive(Debug)]
 pub struct DbRW<const K: usize> {
     path: PathBuf,
@@ -55,8 +55,7 @@ pub struct DbRW<const K: usize> {
 ///
 /// Reads no configuration from the caller: the key length and the bucket
 /// layout both come from the database itself. Sees every entry the writer has
-/// committed, including data written to buckets that did not exist when this
-/// handle was opened.
+/// committed, including those committed after this handle was opened.
 #[derive(Debug)]
 pub struct DbRO<const K: usize> {
     path: PathBuf,
@@ -115,8 +114,8 @@ impl<const K: usize> DbRW<K> {
     }
 
     /// Record sizes of this database's buckets, in tag order.
-    pub fn buckets(&self) -> &[usize] {
-        self.store.bucket_sizes()
+    pub fn buckets(&self) -> Vec<usize> {
+        self.store.bucket_sizes().collect()
     }
 
     pub fn path(&self) -> &Path {
@@ -132,11 +131,15 @@ impl<const K: usize> DbRO<K> {
     /// database at `path`; use [`open_or_create`](Self::open_or_create) to
     /// make one.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
-        let path = path.as_ref().to_path_buf();
+        Self::open_maybe_options(path.as_ref(), None)
+    }
+
+    fn open_maybe_options(path: &Path, options: Option<&Options>) -> Result<Self> {
+        let path = path.to_path_buf();
 
         // Open the store first: it reports a missing or uninitialized database
         // as `NotInitialized`, which is clearer than the index's raw error.
-        let store = Store::open_read_only(&path, K)?;
+        let store = Store::open_read_only(&path, K, options)?;
         let index = Index::open_read_only(&path.join("index"))?;
 
         Ok(Self { path, index, store })
@@ -151,30 +154,28 @@ impl<const K: usize> DbRO<K> {
     /// reader. Useful when a reader may start before any writer has run.
     pub fn open_or_create(path: impl AsRef<Path>, options: &Options) -> Result<Self> {
         let path = path.as_ref();
-        let db = match Self::open(path) {
+        let db = match Self::open_maybe_options(path, Some(options)) {
             Err(Error::NotInitialized) => {
                 // Creating is a write, so it goes through the writer handle,
                 // which lays out the registry, the buckets and the index under
                 // the exclusive lock and releases it again on drop. `Locked`
-                // means another process got there first, and its creation
+                // means another writer got there first, and its creation
                 // serves just as well.
                 match DbRW::<K>::open_or_create(path, options) {
                     Ok(writer) => drop(writer),
                     Err(Error::Locked) => {}
                     Err(e) => return Err(e),
                 }
-                Self::open(path)?
+                Self::open_maybe_options(path, Some(options))?
             }
             result => result?,
         };
-
-        db.store.check_config(options)?;
         Ok(db)
     }
 
     /// Record sizes of this database's buckets, in tag order.
-    pub fn buckets(&self) -> &[usize] {
-        self.store.bucket_sizes()
+    pub fn buckets(&self) -> Vec<usize> {
+        self.store.bucket_sizes().collect()
     }
 
     pub fn path(&self) -> &Path {

@@ -18,6 +18,10 @@ impl Reader {
         })
     }
 
+    pub fn len(&self) -> io::Result<u64> {
+        Ok(self.file.metadata()?.len())
+    }
+
     pub fn read_exact_at(&self, buf: &mut [u8], offset: u64) -> io::Result<()> {
         #[cfg(unix)]
         {
@@ -81,10 +85,7 @@ impl Writer {
     }
 
     pub fn append(&mut self, data: &[u8]) -> io::Result<()> {
-        self.file.write_all(data)?;
-        self.len += data.len() as u64;
-        self.dirty = true;
-        Ok(())
+        append_counted(&mut self.file, data, &mut self.len, &mut self.dirty)
     }
 
     /// Flush appended bytes to stable storage, and return the durable length.
@@ -98,6 +99,32 @@ impl Writer {
         }
         Ok(self.len)
     }
+}
+
+// A failed write may still have appended bytes. Account for each successful
+// write before trying again, so the next record starts at the physical EOF
+// even after an error such as a full disk.
+fn append_counted(
+    file: &mut impl Write,
+    mut data: &[u8],
+    len: &mut u64,
+    dirty: &mut bool,
+) -> io::Result<()> {
+    len.checked_add(data.len() as u64)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "file length overflow"))?;
+    while !data.is_empty() {
+        match file.write(data) {
+            Ok(0) => return Err(io::ErrorKind::WriteZero.into()),
+            Ok(written) => {
+                *len += written as u64;
+                *dirty = true;
+                data = &data[written..];
+            }
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -140,5 +167,44 @@ mod tests {
         let mut buf = [0u8; 3];
         reader.read_exact_at(&mut buf, 0).unwrap();
         assert_eq!(&buf, b"abc");
+    }
+
+    #[test]
+    fn partial_write_error_preserves_the_next_record_offset() {
+        struct LimitedWriter {
+            bytes: Vec<u8>,
+            remaining: usize,
+        }
+        impl Write for LimitedWriter {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                if self.remaining == 0 {
+                    return Err(io::Error::other("injected storage failure"));
+                }
+                let written = bytes.len().min(self.remaining);
+                self.bytes.extend_from_slice(&bytes[..written]);
+                self.remaining -= written;
+                Ok(written)
+            }
+
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let mut file = LimitedWriter {
+            bytes: Vec::new(),
+            remaining: 3,
+        };
+        let mut len = 0;
+        let mut dirty = false;
+        assert!(append_counted(&mut file, b"failed record", &mut len, &mut dirty).is_err());
+        assert_eq!(len, 3);
+        assert!(dirty);
+
+        let next_offset = len as usize;
+        file.remaining = usize::MAX;
+        append_counted(&mut file, b"next record", &mut len, &mut dirty).unwrap();
+        assert_eq!(&file.bytes[next_offset..], b"next record");
+        assert_eq!(len, file.bytes.len() as u64);
     }
 }

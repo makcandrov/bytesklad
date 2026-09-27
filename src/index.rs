@@ -34,7 +34,7 @@ impl Index {
             DatabaseOptions {
                 mode: Mode::ReadWrite(ReadWriteOptions {
                     sync_mode: SyncMode::SafeNoSync,
-                    max_size: Some(map_size as isize),
+                    max_size: Some(isize::try_from(map_size).unwrap()),
                     ..Default::default()
                 }),
                 max_tables: Some(1),

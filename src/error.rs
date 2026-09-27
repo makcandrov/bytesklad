@@ -9,7 +9,7 @@ pub enum Error {
     #[error("index error: {0}")]
     Index(#[from] libmdbx::Error),
 
-    #[error("database is already open for writing by another process")]
+    #[error("database is already open for writing by another handle")]
     Locked,
 
     #[error("database does not exist or has not been initialized by a writer")]
@@ -30,7 +30,10 @@ pub enum Error {
     )]
     BucketTooSmall { max_inline: usize },
 
-    #[error("too many buckets: at most {max} may be declared over the lifetime of a database")]
+    #[error("a bucket record size must not exceed {max} bytes")]
+    BucketTooLarge { max: u64 },
+
+    #[error("too many buckets: a database has at most {max}")]
     TooManyBuckets { max: usize },
 
     #[error("store is full: logical offset exceeds the {max} byte addressable range")]

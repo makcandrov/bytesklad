@@ -151,8 +151,11 @@ For `get(key)` on a database with buckets `[32, 64]`:
 
 Under tag `255`, step 3 speculatively reads 512 bytes and decodes the length
 prefix instead — still one syscall, unless the value runs past the probe, in
-which case the remainder is fetched exactly. Under tag `0` steps 2 and 3 do not
-happen: the pointer step 1 returned already holds the bytes.
+which case the remainder is fetched exactly. A value over 64 KiB, in either kind
+of bucket, is first checked against the file's length so that a corrupt length
+cannot trigger a huge allocation; that costs one metadata query on reads that
+large. Under tag `0` steps 2 and 3 do not happen: the pointer step 1 returned
+already holds the bytes.
 
 ---
 
@@ -208,13 +211,24 @@ Every batch is made durable in a fixed order:
 So the index never becomes durable before the bytes it names. The opposite —
 bytes with no index entry — is harmless: they are never read, and a writer
 truncates each bucket back to the checkpointed frontier when it next opens the
-database. Only a crash in the window between steps 2 and 3 leaks them for good,
-costing disk and nothing else.
+database. A crash between steps 2 and 3, or continuing to write after a failed
+batch, can retain unindexed bytes permanently, costing disk and nothing else.
+
+Creation publishes an initial checkpoint before accepting writes. A writer
+refuses to recover nonempty buckets without their checkpoint, or buckets
+shorter than their recorded frontier. Missing registry metadata and malformed
+bucket tables are also errors; `open_or_create` does not reset an existing
+database whose identity file is missing. Keep the index, registry, checkpoint,
+and bucket files together when copying or restoring a database.
+
+An error before the index commit aborts the batch. If the final index flush
+fails after commit, entries may already be visible but their durability is
+uncertain. Retrying the batch skips any keys already committed.
 
 **Flushing is proportional to what you wrote, not to what you opened**: eight
-buckets and one 32-byte insert is one fsync, not nine, and a sync with nothing
-pending touches the disk not at all. Prefer `insert_batch` for bulk ingest — it
-flushes once per batch, where `insert` flushes once per call.
+buckets and one 32-byte insert is one bucket fsync, not nine, and a sync with
+nothing pending touches the disk not at all. Prefer `insert_batch` for bulk
+ingest — it flushes once per batch, where `insert` flushes once per call.
 
 ---
 
@@ -224,15 +238,14 @@ flushes once per batch, where `insert` flushes once per call.
 lock on `LOCK` for its session, released by the OS if the process dies; a second
 [`DbRW`] anywhere on the machine fails with `Error::Locked`. Any number of
 [`DbRO`] handles in other processes read alongside it and see everything it has
-committed. Readers hold nothing stale: bucket files are opened once, on first
-use, and every read is positioned, so a reader sees whatever has been appended
-since — and one that meets an unknown tag reloads the registry rather than
-failing.
+committed. Readers hold nothing stale: the bucket layout is fixed at creation,
+bucket files are opened once, on first use, and every read is positioned, so a
+reader sees whatever has been appended since.
 
 Within a single process, share one handle rather than opening a second. [`DbRW`]
 is `Send + Sync` and implements [`DbRead`], serving reads and writes from any
-number of threads at once — inserts serialize only per bucket, and reads never
-block. Opening a [`DbRO`] on a path this same process already has open for
+number of threads at once — batches serialize on the index's single write
+transaction, and reads never block. Opening a [`DbRO`] on a path this same process already has open for
 writing fails, because MDBX permits one environment handle per process.
 
 ---
@@ -242,15 +255,20 @@ writing fails, because MDBX permits one environment handle per process.
 | | |
 |---|---|
 | Key length | fixed at creation, any `K` |
-| Value length | 0 bytes to 64 PiB, though the index caps practical sizes far below that |
+| Value length | Up to the bucket's remaining capacity, including framing; each read allocates the whole value in memory |
 | Inline values | up to 6 bytes, carried by the index entry with no file behind them |
-| Size buckets | 254 over the lifetime of a database, each of 7 bytes or more |
+| Size buckets | up to 254, fixed at creation, each of 7 bytes or more |
 | Bucket capacity | 64 PiB of address space each, or the filesystem's maximum file size if that is lower |
 | Writers | one per database, process-wide exclusion |
-| Readers | unbounded, in other processes |
+| Readers | any number of processes, sharing MDBX's reader table: at least 61 concurrent read transactions by default |
 | Target | 64-bit; developed against Linux, and tested on Windows |
 
 Deletion, update, and range iteration are out of scope by design.
+
+The database directory is trusted local storage. Format checks catch invalid
+sizes and inconsistent recovery metadata, but do not authenticate records or
+detect every modification. Very large values, including values in sparse
+files, can still exhaust memory; do not open untrusted database directories.
 
 ## License
 

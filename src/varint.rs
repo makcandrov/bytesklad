@@ -21,6 +21,11 @@ pub(crate) fn decode(buf: &[u8]) -> Option<(u64, usize)> {
     let mut value = 0u64;
     let mut shift = 0u32;
     for (i, &byte) in buf.iter().take(MAX_ENCODED_LEN).enumerate() {
+        // The tenth byte has only one bit left in a u64. Do not silently
+        // discard overflowing bits from corrupt length prefixes.
+        if i == MAX_ENCODED_LEN - 1 && byte > 1 {
+            return None;
+        }
         value |= u64::from(byte & 0x7f) << shift;
         if byte & 0x80 == 0 {
             return Some((value, i + 1));
@@ -67,5 +72,14 @@ mod tests {
         let mut buf = [0u8; MAX_ENCODED_LEN];
         let len = encode(1 << 40, &mut buf);
         assert_eq!(decode(&buf[..len - 1]), None);
+    }
+
+    #[test]
+    fn overflowing_length_prefix_fails() {
+        let mut buf = [0x80; MAX_ENCODED_LEN];
+        buf[MAX_ENCODED_LEN - 1] = 2;
+        assert_eq!(decode(&buf), None);
+        buf[MAX_ENCODED_LEN - 1] = 0x81;
+        assert_eq!(decode(&buf), None);
     }
 }

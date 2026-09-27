@@ -42,9 +42,10 @@ pub trait DbRead<const K: usize> {
 /// index entry naming them commits, so the index never points at bytes that
 /// are missing. The reverse — bytes in the store with no index entry — can
 /// happen, and those bytes are simply never read again. Most such bytes sit
-/// past the durable frontier and are truncated on the next writer open; only
-/// a failure in the narrow window between the store sync and the index commit
-/// leaks them permanently. The trade is deliberate: a dangling pointer would
+/// past the durable frontier and are truncated on the next writer open. A
+/// failure between the store sync and index commit, or continuing to write
+/// after a failed batch, can include those bytes in a later checkpoint and
+/// retain them permanently. The trade is deliberate: a dangling pointer would
 /// surface as a read error, whereas leaked bytes only cost disk.
 pub trait DbWrite<const K: usize>: DbRead<K> {
     /// Insert one entry, returning `false` if `key` was already present.
@@ -60,7 +61,9 @@ pub trait DbWrite<const K: usize>: DbRead<K> {
     /// skipped. The whole batch becomes durable with a single flush of the
     /// store and a single flush of the index.
     ///
-    /// On error the index transaction is aborted and no entry is committed.
+    /// An error before the index commit aborts the transaction. If the final
+    /// index flush fails after commit, the entries may already be visible;
+    /// durability is then uncertain. Retrying skips keys already committed.
     fn insert_batch<'a>(
         &self,
         entries: impl IntoIterator<Item = (&'a [u8; K], &'a [u8])>,

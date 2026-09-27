@@ -626,3 +626,24 @@ fn buckets_at_or_below_the_inline_limit_are_rejected() {
     assert_eq!(db.get(&key(1)).unwrap().unwrap(), value(1, 7));
     assert_eq!(bucket_len(&sized_bucket(dir.path(), 7)), 7);
 }
+
+#[test]
+fn records_land_in_their_own_size_bucket() {
+    // FxHashMap iterates these sizes out of declaration order, which once misrouted them.
+    let dir = tempfile::tempdir().unwrap();
+    {
+        let db =
+            DbRW::<32>::open_or_create(dir.path(), &Options::new().buckets([48, 100])).unwrap();
+        db.insert(&key(1), &value(1, 48)).unwrap();
+        db.insert(&key(2), &value(2, 100)).unwrap();
+        assert_eq!(db.get(&key(1)).unwrap().unwrap(), value(1, 48));
+        assert_eq!(db.get(&key(2)).unwrap().unwrap(), value(2, 100));
+    }
+
+    let db = DbRW::<32>::open(dir.path()).unwrap();
+    assert_eq!(db.buckets(), &[48, 100]);
+    assert_eq!(db.get(&key(1)).unwrap().unwrap(), value(1, 48));
+    assert_eq!(db.get(&key(2)).unwrap().unwrap(), value(2, 100));
+    assert_eq!(bucket_len(&sized_bucket(dir.path(), 48)), 48);
+    assert_eq!(bucket_len(&sized_bucket(dir.path(), 100)), 100);
+}
